@@ -1,6 +1,10 @@
 name: 内核符号分析
 
 on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'kernelcache.release'
   workflow_dispatch:
 
 jobs:
@@ -9,6 +13,14 @@ jobs:
     
     steps:
       - uses: actions/checkout@v4
+      
+      - name: 检查内核文件
+        run: |
+          if [ ! -f kernelcache.release ]; then
+            echo "❌ 未找到 kernelcache.release"
+            exit 1
+          fi
+          echo "✅ 找到内核文件 ($(ls -lh kernelcache.release | awk '{print $5}'))"
       
       - name: 运行分析脚本
         run: |
