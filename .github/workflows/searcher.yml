@@ -1,0 +1,25 @@
+name: 本地 TrustCache 查找
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: macos-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: 运行 TrustCache 提取
+        run: |
+          chmod +x extract_trustcache.sh
+          ./extract_trustcache.sh
+      
+      - name: 上传分析结果
+        uses: actions/upload-artifact@v4
+        with:
+          name: trustcache-analysis
+          path: trustcache_local/
+          retention-days: 90
