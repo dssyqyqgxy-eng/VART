@@ -1,0 +1,27 @@
+name: macOS 签名验证框架分析
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: macos-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: 运行分析脚本
+        run: |
+          chmod +x analyze_all.sh
+          ./analyze_all.sh
+          echo "=== 生成的文件 ==="
+          ls -la signing_analysis.zip
+      
+      - name: 上传分析结果
+        uses: actions/upload-artifact@v4
+        with:
+          name: signing-analysis
+          path: signing_analysis.zip
+          retention-days: 90
