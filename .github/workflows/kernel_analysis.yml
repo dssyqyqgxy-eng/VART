@@ -1,7 +1,8 @@
 name: 内核符号分析
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [ main ]
 
 jobs:
   analyze:
@@ -12,15 +13,11 @@ jobs:
       
       - name: 检查内核文件
         run: |
-          echo "=== 当前目录 ==="
-          pwd
-          echo "=== 文件列表 ==="
-          ls -la
           if [ -f kernelcache.release ]; then
             echo "✅ 找到内核文件 ($(ls -lh kernelcache.release | awk '{print $5}'))"
           else
-            echo "❌ 未找到 kernelcache.release"
-            echo "请确保文件在仓库根目录"
+            echo "⏭️ 没有内核文件，跳过分析"
+            exit 0
           fi
       
       - name: 运行分析脚本
