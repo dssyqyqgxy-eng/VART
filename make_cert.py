@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Apple 高仿证书生成器 - 系统文件 OID 版"""
-import datetime, os, sys, base64, zipfile, uuid, random, string
+"""Apple 高仿证书生成器 - 最终修正版"""
+import datetime, os, sys, base64, zipfile, uuid
 from cryptography import x509
 from cryptography.x509.oid import ObjectIdentifier, NameOID, ExtendedKeyUsageOID
 from cryptography.hazmat.primitives import hashes, serialization
@@ -16,33 +16,29 @@ DAYS = 2912000
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ============================================================
-# OID（来源：Anchors.plist + CertPinning.plist）
-# ============================================================
 # CA 证书策略
 OID_ROOT_GENERIC  = ObjectIdentifier("1.2.840.113635.100.1.2")
 OID_ROOT_CODESIGN = ObjectIdentifier("1.2.840.113635.100.1.108")
+OID_ROOT_PRIVATE  = ObjectIdentifier("1.2.840.113635.100.1.115")
 
-# 叶子证书策略
+# 叶子证书策略（全部放入 CertificatePolicies）
 OID_POLICY_5_1      = ObjectIdentifier("1.2.840.113635.100.5.1")
+OID_ROOT_PRIVATE    = ObjectIdentifier("1.2.840.113635.100.1.115")
 OID_APPLE_ISSUED_1  = ObjectIdentifier("1.2.840.113635.100.6.86")
 OID_APPLE_ISSUED_2  = ObjectIdentifier("1.2.840.113635.100.6.87")
+OID_PROD_MARK       = ObjectIdentifier("1.2.840.113635.100.6.27.11.1")
+OID_LEAF_MARK       = ObjectIdentifier("1.2.840.113635.100.6.27.18")
 
-# 代码签名平台（6.1.1 - 6.1.10）
+# 代码签名平台
 OID_1_x = [ObjectIdentifier(f"1.2.840.113635.100.6.1.{i}") for i in range(1, 11)]
 
-# IPA 签名核心（来自 Anchors.plist）
+# IPA 签名核心
 OID_IPA_SIGNING = ObjectIdentifier("1.2.840.113635.100.6.1.13")
 
-# WWDR 标记
-OID_WWDR = ObjectIdentifier("1.2.840.113635.100.6.2.1")
-
-# 系统安全
+# WWDR / 系统安全
+OID_WWDR     = ObjectIdentifier("1.2.840.113635.100.6.2.1")
 OID_INTEG    = ObjectIdentifier("1.2.840.113635.100.6.3.1")
 OID_SEC_BOOT = ObjectIdentifier("1.2.840.113635.100.6.3.2")
-
-# CertPinning 标记
-OID_PROD_MARK = ObjectIdentifier("1.2.840.113635.100.6.27.11.1")
-OID_LEAF_MARK = ObjectIdentifier("1.2.840.113635.100.6.27.18")
 
 def gen_key():
     return rsa.generate_private_key(65537, 2048, default_backend())
@@ -73,11 +69,11 @@ def build_cert(subject, issuer, issuer_key, subject_key, is_ca=False):
                           key_encipherment=False, data_encipherment=False,
                           key_agreement=False, encipher_only=False,
                           decipher_only=False), critical=True)
-        # CA 策略：根策略
         builder = builder.add_extension(
             x509.CertificatePolicies([
                 x509.PolicyInformation(OID_ROOT_GENERIC, policy_qualifiers=None),
                 x509.PolicyInformation(OID_ROOT_CODESIGN, policy_qualifiers=None),
+                x509.PolicyInformation(OID_ROOT_PRIVATE, policy_qualifiers=None),
             ]), critical=False)
     else:
         builder = builder.add_extension(
@@ -88,20 +84,21 @@ def build_cert(subject, issuer, issuer_key, subject_key, is_ca=False):
                           decipher_only=False), critical=True)
         builder = builder.add_extension(
             x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CODE_SIGNING]), critical=False)
-        # 叶子策略
         builder = builder.add_extension(
             x509.CertificatePolicies([
                 x509.PolicyInformation(OID_POLICY_5_1, policy_qualifiers=[
                     "https://www.apple.com/certificateauthority/"]),
+                x509.PolicyInformation(OID_ROOT_PRIVATE, policy_qualifiers=None),
                 x509.PolicyInformation(OID_APPLE_ISSUED_1, policy_qualifiers=None),
                 x509.PolicyInformation(OID_APPLE_ISSUED_2, policy_qualifiers=None),
+                x509.PolicyInformation(OID_PROD_MARK, policy_qualifiers=None),
+                x509.PolicyInformation(OID_LEAF_MARK, policy_qualifiers=None),
             ]), critical=False)
 
     builder = builder.add_extension(
         x509.CRLDistributionPoints([
             x509.DistributionPoint(
-                full_name=[x509.UniformResourceIdentifier(
-                    "http://crl.apple.com/root.crl")],
+                full_name=[x509.UniformResourceIdentifier("http://crl.apple.com/root.crl")],
                 relative_name=None, reasons=None, crl_issuer=None
             )
         ]), critical=False)
@@ -113,9 +110,7 @@ def build_cert(subject, issuer, issuer_key, subject_key, is_ca=False):
             )
         ]), critical=False)
     builder = builder.add_extension(
-        x509.SubjectAlternativeName([
-            x509.RFC822Name("apple@apple.com")
-        ]), critical=False)
+        x509.SubjectAlternativeName([x509.RFC822Name("apple@apple.com")]), critical=False)
 
     if not is_ca:
         for oid in OID_1_x:
@@ -129,10 +124,6 @@ def build_cert(subject, issuer, issuer_key, subject_key, is_ca=False):
             x509.UnrecognizedExtension(OID_INTEG, b'\x05\x00'), critical=False)
         builder = builder.add_extension(
             x509.UnrecognizedExtension(OID_SEC_BOOT, b'\x05\x00'), critical=False)
-        builder = builder.add_extension(
-            x509.UnrecognizedExtension(OID_PROD_MARK, b'\x05\x00'), critical=False)
-        builder = builder.add_extension(
-            x509.UnrecognizedExtension(OID_LEAF_MARK, b'\x05\x00'), critical=False)
 
     return builder.sign(issuer_key, hashes.SHA256(), default_backend())
 
