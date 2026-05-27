@@ -1,11 +1,12 @@
-name: 内核符号分析
+name: 内核 Team ID 提取
 
 on:
   push:
     branches: [ main ]
+  workflow_dispatch:
 
 jobs:
-  analyze:
+  extract:
     runs-on: macos-latest
     
     steps:
@@ -13,21 +14,29 @@ jobs:
       
       - name: 检查内核文件
         run: |
+          echo "=== 当前目录 ==="
+          pwd
+          echo "=== 文件列表 ==="
+          ls -la
           if [ -f kernelcache.release ]; then
             echo "✅ 找到内核文件 ($(ls -lh kernelcache.release | awk '{print $5}'))"
           else
-            echo "⏭️ 没有内核文件，跳过分析"
+            echo "⏭️ 没有内核文件，跳过"
             exit 0
           fi
       
-      - name: 运行分析脚本
+      - name: 运行提取脚本
         run: |
-          chmod +x extract_and_upload.sh
-          ./extract_and_upload.sh
+          chmod +x extract_teamid.sh
+          ./extract_teamid.sh
+          echo "=== 生成的文件 ==="
+          ls -la *.zip 2>/dev/null || echo "⚠️ 未找到 zip 文件"
       
       - name: 上传分析结果
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-analysis
-          path: kernel_analysis.zip
+          name: kernel-teamid-analysis
+          path: |
+            kernel_teamid_analysis.zip
+            kernel_analysis.zip
           retention-days: 90
