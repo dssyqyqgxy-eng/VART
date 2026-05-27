@@ -1,7 +1,6 @@
 #!/bin/bash
-# iOS 内核符号提取 + 打包上传脚本
-# 用法: ./extract_and_upload.sh
-# 前提: 项目根目录有 kernelcache.release 文件
+# iOS 内核 Team ID 提取脚本（精确版）
+# 用法: ./extract_teamid.sh
 
 set -e
 
@@ -11,106 +10,122 @@ OUTPUT="kernel_analysis"
 mkdir -p "${OUTPUT}"
 
 echo "============================================"
-echo "  iOS 内核符号提取 + 打包"
+echo "  iOS 内核 Team ID 提取"
 echo "============================================"
 
-# 检查内核文件
 if [ ! -f "${KERNEL}" ]; then
-    echo "❌ 未找到 ${KERNEL}，请放到项目根目录"
+    echo "❌ 未找到 ${KERNEL}"
     exit 1
 fi
 
 echo ">>> 内核: ${KERNEL} ($(ls -lh ${KERNEL} | awk '{print $5}'))"
 
 # ============================================================
-# 1. 提取字符串
+# 1. Apple Team ID 格式：[A-Z][A-Z0-9]{9}
 # ============================================================
 echo ""
-echo ">>> [1/3] 提取字符串..."
+echo ">>> [1/6] 提取 Team ID（Apple 格式）..."
 
-strings "${KERNEL}" | grep -iE "apple|iphone|developer|certificate|identity|trust" > "${OUTPUT}/01_strings_apple.txt" 2>/dev/null || true
-strings "${KERNEL}" | grep -i "amfi" > "${OUTPUT}/02_strings_amfi.txt" 2>/dev/null || true
-strings "${KERNEL}" | grep -oE '[A-Z0-9]{10}' | sort -u > "${OUTPUT}/03_teamid_candidates.txt" 2>/dev/null || true
-strings "${KERNEL}" | grep "1.2.840.113635" | sort -u > "${OUTPUT}/04_oid_strings.txt" 2>/dev/null || true
-strings "${KERNEL}" | grep -iE "coretrust|trustcache|trustd" > "${OUTPUT}/05_coretrust_strings.txt" 2>/dev/null || true
-strings "${KERNEL}" | grep -iE "codesign|signature|verify|evaluate|validate" > "${OUTPUT}/06_signing_strings.txt" 2>/dev/null || true
-strings "${KERNEL}" | grep -iE "provision|profile|entitlement|embedded" > "${OUTPUT}/07_profile_strings.txt" 2>/dev/null || true
-
-echo "    ✅ 字符串提取完成"
+strings "${KERNEL}" | grep -oE '[A-Z][A-Z0-9]{9}' | sort | uniq -c | sort -rn | head -50 > "${OUTPUT}/teamid_apple_format.txt"
+echo "    → teamid_apple_format.txt"
 
 # ============================================================
-# 2. 提取符号
+# 2. 只提取 10 位字母数字组合
 # ============================================================
-echo ""
-echo ">>> [2/3] 提取符号..."
+echo ">>> [2/6] 提取 10 位字母数字..."
 
-if file "${KERNEL}" | grep -q "Mach-O"; then
-    echo "    Mach-O 格式: ✅"
-    nm "${KERNEL}" 2>/dev/null | grep -iE "amfi|trust|cert|team|sign|verify|evaluate" > "${OUTPUT}/08_symbols_filtered.txt" || true
-    nm "${KERNEL}" 2>/dev/null > "${OUTPUT}/09_symbols_all.txt" || true
-else
-    echo "    ⚠️  img4 格式，跳过符号表"
-fi
-
-echo "    ✅ 符号提取完成"
+strings "${KERNEL}" | grep -oE '[A-Z0-9]{10}' | sort | uniq -c | sort -rn | head -100 > "${OUTPUT}/teamid_10char.txt"
+echo "    → teamid_10char.txt"
 
 # ============================================================
-# 3. 分析 + 报告 + 打包
+# 3. 过滤掉全重复字符的噪音
+# ============================================================
+echo ">>> [3/6] 过滤噪音..."
+
+grep -vE '^(.)\1{9}$' "${OUTPUT}/teamid_10char.txt" > "${OUTPUT}/teamid_filtered.txt"
+echo "    → teamid_filtered.txt"
+
+# ============================================================
+# 4. 搜索已知 Team ID
 # ============================================================
 echo ""
-echo ">>> [3/3] 分析 + 打包..."
+echo ">>> [4/6] 已知 Team ID 搜索..."
 
-# 已知 Team ID 搜索
-> "${OUTPUT}/10_known_teamids.txt"
-for id in 59GAB85EFG SKMME9E2Y7 0000000000 APPLETEAM 95M7Z54P8M HFJ3M4U732 EQHXZ8M8AV; do
-    count=$(strings "${KERNEL}" 2>/dev/null | grep -c "${id}" || echo 0)
-    echo "    ${id}: ${count} 次" | tee -a "${OUTPUT}/10_known_teamids.txt"
+KNOWN_IDS=(
+    "59GAB85EFG" "SKMME9E2Y7" "0000000000" "APPLETEAM"
+    "95M7Z54P8M" "HFJ3M4U732" "EQHXZ8M8AV" "3B6K4J5L8M"
+    "FQJ8J3P6X6" "U35G6FL7CE" "3FTAU7JA3Y"
+)
+
+> "${OUTPUT}/teamid_known.txt"
+for id in "${KNOWN_IDS[@]}"; do
+    count=$(strings "${KERNEL}" | grep -c "${id}" 2>/dev/null || echo 0)
+    printf "%-15s: %d 次\n" "${id}" "${count}" | tee -a "${OUTPUT}/teamid_known.txt"
 done
+echo "    → teamid_known.txt"
 
-# 出现最多的 10 位字母数字组合
-strings "${KERNEL}" | grep -oE '[A-Z0-9]{10}' | sort | uniq -c | sort -rn | head -50 > "${OUTPUT}/11_top_teamids.txt" 2>/dev/null || true
+# ============================================================
+# 5. 搜索 Apple OID
+# ============================================================
+echo ""
+echo ">>> [5/6] Apple OID..."
 
-# 唯一 OID
-strings "${KERNEL}" | grep -oE '1\.2\.840\.113635\.100\.[0-9]+\.[0-9]+' | sort -u > "${OUTPUT}/12_oid_unique.txt" 2>/dev/null || true
-OID_COUNT=$(wc -l < "${OUTPUT}/12_oid_unique.txt" 2>/dev/null || echo 0)
+strings "${KERNEL}" | grep "1.2.840.113635" | sort -u > "${OUTPUT}/oid_all.txt"
+strings "${KERNEL}" | grep -oE '1\.2\.840\.113635\.100\.[0-9]+\.[0-9]+' | sort -u > "${OUTPUT}/oid_unique.txt"
 
-# 生成报告
+OID_COUNT=$(wc -l < "${OUTPUT}/oid_unique.txt" 2>/dev/null || echo 0)
+echo "    找到 ${OID_COUNT} 个唯一 Apple OID"
+echo "    → oid_all.txt"
+echo "    → oid_unique.txt"
+
+# ============================================================
+# 6. 搜索 AMFI / CoreTrust
+# ============================================================
+echo ""
+echo ">>> [6/6] 签名验证相关..."
+
+strings "${KERNEL}" | grep -i "amfi" > "${OUTPUT}/amfi_strings.txt" 2>/dev/null || true
+strings "${KERNEL}" | grep -iE "coretrust|trustcache" > "${OUTPUT}/coretrust_strings.txt" 2>/dev/null || true
+strings "${KERNEL}" | grep -iE "teamid|team.identifier" > "${OUTPUT}/teamid_strings.txt" 2>/dev/null || true
+
+echo "    → amfi_strings.txt"
+echo "    → coretrust_strings.txt"
+echo "    → teamid_strings.txt"
+
+# ============================================================
+# 7. 生成报告 + 打包
+# ============================================================
+echo ""
+echo ">>> 生成报告..."
+
 cat > "${OUTPUT}/REPORT.txt" << EOF
 ============================================
-  iOS 内核符号分析报告
+  iOS 内核 Team ID 分析报告
 ============================================
-内核文件: ${KERNEL}
-大小:     $(ls -lh ${KERNEL} | awk '{print $5}')
-时间:     $(date)
-Apple OID: ${OID_COUNT} 个
+内核: ${KERNEL}
+大小: $(ls -lh ${KERNEL} | awk '{print $5}')
+时间: $(date)
+============================================
 
-已知 Team ID:
-$(cat "${OUTPUT}/10_known_teamids.txt" 2>/dev/null || echo "无")
+已知 Team ID 出现次数:
+$(cat "${OUTPUT}/teamid_known.txt")
 
-文件清单:
-  01_strings_apple.txt       - Apple 相关字符串
-  02_strings_amfi.txt        - AMFI 相关
-  03_teamid_candidates.txt   - Team ID 候选
-  04_oid_strings.txt         - Apple OID
-  05_coretrust_strings.txt   - CoreTrust 相关
-  06_signing_strings.txt     - 签名验证相关
-  07_profile_strings.txt     - 描述文件相关
-  08_symbols_filtered.txt    - 过滤符号
-  09_symbols_all.txt         - 全部符号
-  10_known_teamids.txt       - 已知 Team ID
-  11_top_teamids.txt         - 出现最多的 Team ID
-  12_oid_unique.txt          - 唯一 OID
+Apple OID 数量: ${OID_COUNT}
+
+出现最多的 10 位组合（已过滤噪音）:
+$(head -20 "${OUTPUT}/teamid_filtered.txt")
+
 ============================================
 EOF
 
 echo "    → REPORT.txt"
 
 # 打包
-zip -qr kernel_analysis.zip "${OUTPUT}/"
+zip -qr kernel_teamid_analysis.zip "${OUTPUT}/"
 
 echo ""
 echo "============================================"
 echo "  ✅ 完成"
-echo "  📥 kernel_analysis.zip"
-echo "  📄 报告: ${OUTPUT}/REPORT.txt"
+echo "  📥 kernel_teamid_analysis.zip"
+echo "  📄 ${OUTPUT}/REPORT.txt"
 echo "============================================"
