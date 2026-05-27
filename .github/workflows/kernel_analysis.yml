@@ -14,10 +14,6 @@ jobs:
       
       - name: 检查内核文件
         run: |
-          echo "=== 当前目录 ==="
-          pwd
-          echo "=== 文件列表 ==="
-          ls -la
           if [ -f kernelcache.release ]; then
             echo "✅ 找到内核文件 ($(ls -lh kernelcache.release | awk '{print $5}'))"
           else
@@ -27,10 +23,10 @@ jobs:
       
       - name: 运行提取脚本
         run: |
-          chmod +x extract_teamid.sh
-          ./extract_teamid.sh
+          chmod +x extract_kernel_symbols.sh
+          ./extract_kernel_symbols.sh
           echo "=== 生成的文件 ==="
-          ls -la *.zip 2>/dev/null || echo "⚠️ 未找到 zip 文件"
+          ls -la *.zip 2>/dev/null || echo "⚠️ 未找到 zip"
       
       - name: 上传分析结果
         uses: actions/upload-artifact@v4
