@@ -1,0 +1,23 @@
+name: 内核符号分析
+
+on:
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: macos-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: 运行分析脚本
+        run: |
+          chmod +x extract_and_upload.sh
+          ./extract_and_upload.sh
+      
+      - name: 上传分析结果
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-analysis
+          path: kernel_analysis.zip
+          retention-days: 90
