@@ -10,6 +10,8 @@ on:
 env:
   DEVICE: "iPhone11,2"
   VERSION: "18.7.6"
+  BUILD: "22H320"
+  FIRMWARE_URL: "https://updates.cdn-apple.com/2026WinterFCS/fullrestores/047-83292/FC308431-84C0-4001-9A24-09FC77486C76/iPhone11,2,iPhone11,4,iPhone11,6_18.7.6_22H320_Restore.ipsw"
 
 jobs:
   extract:
@@ -33,34 +35,45 @@ jobs:
           ipsw version
           echo "✅ ipsw 安装完成"
       
-      - name: Show available firmwares
+      - name: Download firmware with direct URL
         run: |
-          echo "设备: $DEVICE"
-          echo "版本: $VERSION"
-          echo ""
-          echo "可用的 iOS 版本:"
-          ipsw download --list --device $DEVICE 2>/dev/null | head -20 || echo "无法获取列表"
-      
-      - name: Download firmware
-        run: |
-          echo "下载固件 ${DEVICE}_${VERSION}..."
-          ipsw download $DEVICE --version $VERSION -o firmware.ipsw
+          echo "使用直接链接下载固件..."
+          echo "URL: $FIRMWARE_URL"
           
+          # 使用 curl 下载，带重试和断点续传
+          curl -L -C - -o firmware.ipsw \
+            --retry 5 \
+            --retry-delay 10 \
+            --connect-timeout 30 \
+            --max-time 3600 \
+            "$FIRMWARE_URL"
+          
+          # 检查下载是否成功
           if [ -f "firmware.ipsw" ]; then
             SIZE=$(ls -lh firmware.ipsw | awk '{print $5}')
-            echo "✅ 下载完成: $SIZE"
+            echo "✅ 固件下载成功! 大小: $SIZE"
+            
+            # 可选：验证文件大小（iOS 18 IPSW 通常 6-8GB）
+            SIZE_BYTES=$(stat -f%z firmware.ipsw 2>/dev/null || stat -c%s firmware.ipsw 2>/dev/null)
+            if [ "$SIZE_BYTES" -lt 5000000000 ]; then
+              echo "⚠️ 警告: 文件小于 5GB，可能下载不完整"
+            fi
           else
-            echo "❌ 下载失败"
+            echo "❌ 固件下载失败"
+            exit 1
           fi
-        continue-on-error: true
+      
+      - name: Verify IPSW integrity
+        run: |
+          echo "验证 IPSW 文件..."
+          file firmware.ipsw
+          
+          # 检查是否为有效的 zip 文件
+          unzip -tq firmware.ipsw 2>&1 | head -5 || true
+          echo "✅ IPSW 验证完成"
       
       - name: Extract dyld cache
         run: |
-          if [ ! -f "firmware.ipsw" ]; then
-            echo "固件文件不存在，跳过"
-            exit 0
-          fi
-          
           echo "解压 IPSW..."
           unzip -q firmware.ipsw -d firmware/
           
@@ -79,10 +92,10 @@ jobs:
           
           # 复制 dyld 缓存
           if [ -f "/Volumes/System/System/Library/dyld/dyld_shared_cache_arm64e" ]; then
-            cp /Volumes/System/System/Library/dyld/dyld_shared_cache_arm64e ios_extracted/dyld_cache/
+            cp "/Volumes/System/System/Library/dyld/dyld_shared_cache_arm64e" ios_extracted/dyld_cache/
             echo "✅ 复制 dyld_shared_cache_arm64e"
           elif [ -f "/Volumes/System/System/Library/dyld/dyld_shared_cache_arm64" ]; then
-            cp /Volumes/System/System/Library/dyld/dyld_shared_cache_arm64 ios_extracted/dyld_cache/
+            cp "/Volumes/System/System/Library/dyld/dyld_shared_cache_arm64" ios_extracted/dyld_cache/
             echo "✅ 复制 dyld_shared_cache_arm64"
           else
             echo "⚠️ 未找到 dyld 缓存"
@@ -110,16 +123,6 @@ jobs:
             fi
           done
           
-          # 也检查 /sbin 和 /usr/bin
-          for daemon in launchd sandboxd; do
-            if [ -f "/Volumes/System/sbin/$daemon" ]; then
-              cp "/Volumes/System/sbin/$daemon" ios_extracted/daemons/ 2>/dev/null || true
-            fi
-            if [ -f "/Volumes/System/usr/bin/$daemon" ]; then
-              cp "/Volumes/System/usr/bin/$daemon" ios_extracted/daemons/ 2>/dev/null || true
-            fi
-          done
-          
           hdiutil detach /Volumes/System || true
           
           echo ""
@@ -135,21 +138,17 @@ jobs:
           echo "复制框架..."
           
           # AMFI 框架
-          if [ -d "/Volumes/System/System/Library/PrivateFrameworks/AppleMobileFileIntegrity.framework" ]; then
-            cp -R "/Volumes/System/System/Library/PrivateFrameworks/AppleMobileFileIntegrity.framework" ios_extracted/frameworks/
+          AMFI_PATH="/Volumes/System/System/Library/PrivateFrameworks/AppleMobileFileIntegrity.framework"
+          if [ -d "$AMFI_PATH" ]; then
+            cp -R "$AMFI_PATH" ios_extracted/frameworks/
             echo "✅ AMFI 框架"
           fi
           
           # Security 框架
-          if [ -d "/Volumes/System/System/Library/Frameworks/Security.framework" ]; then
-            cp -R "/Volumes/System/System/Library/Frameworks/Security.framework" ios_extracted/frameworks/
+          SECURITY_PATH="/Volumes/System/System/Library/Frameworks/Security.framework"
+          if [ -d "$SECURITY_PATH" ]; then
+            cp -R "$SECURITY_PATH" ios_extracted/frameworks/
             echo "✅ Security 框架"
-          fi
-          
-          # IOKit 框架（可选）
-          if [ -d "/Volumes/System/System/Library/Frameworks/IOKit.framework" ]; then
-            cp -R "/Volumes/System/System/Library/Frameworks/IOKit.framework" ios_extracted/frameworks/
-            echo "✅ IOKit 框架"
           fi
           
           hdiutil detach /Volumes/System || true
@@ -166,17 +165,23 @@ jobs:
           # 从守护进程提取字符串
           for daemon in amfid installd sandboxd trustd; do
             if [ -f "ios_extracted/daemons/$daemon" ]; then
-              strings ios_extracted/daemons/$daemon > ios_extracted/symbols/${daemon}_all_strings.txt 2>/dev/null || true
-              strings ios_extracted/daemons/$daemon | grep -E "com.apple|XPC|entitlement|AMFI|sandbox|version|error" > ios_extracted/symbols/${daemon}_key_strings.txt 2>/dev/null || true
-              echo "✅ $daemon: $(wc -l < ios_extracted/symbols/${daemon}_all_strings.txt) 字符串"
+              # 所有字符串
+              strings ios_extracted/daemons/$daemon > ios_extracted/symbols/${daemon}_all_strings.txt 2>/dev/null
+              # 关键字符串（XPC、entitlements等）
+              strings ios_extracted/daemons/$daemon | grep -E "com.apple|XPC|entitlement|AMFI|sandbox|version|error|fail" > ios_extracted/symbols/${daemon}_key_strings.txt 2>/dev/null
+              
+              COUNT=$(wc -l < ios_extracted/symbols/${daemon}_key_strings.txt 2>/dev/null || echo "0")
+              echo "✅ $daemon: $COUNT 关键字符串"
             fi
           done
           
           # 从 dyld 缓存提取关键字符串
           DYLD=$(find ios_extracted/dyld_cache -name "dyld_shared_cache*" -type f | head -1)
           if [ -n "$DYLD" ]; then
-            strings "$DYLD" | grep -E "amfid|installd|sandboxd|trustd|AMFI" > ios_extracted/symbols/dyld_key_strings.txt 2>/dev/null || true
-            echo "✅ dyld 关键字符串: $(wc -l < ios_extracted/symbols/dyld_key_strings.txt)"
+            echo "从 dyld 缓存提取关键字符串..."
+            strings "$DYLD" | grep -E "amfid|installd|sandboxd|trustd|AMFI|Security|com.apple" > ios_extracted/symbols/dyld_key_strings.txt 2>/dev/null || true
+            COUNT=$(wc -l < ios_extracted/symbols/dyld_key_strings.txt 2>/dev/null || echo "0")
+            echo "✅ dyld: $COUNT 关键字符串"
           fi
       
       - name: Generate extraction report
@@ -189,10 +194,9 @@ jobs:
           EOF
           
           echo "- **设备**: $DEVICE" >> ios_extracted/README.md
-          echo "- **iOS 版本**: $VERSION" >> ios_extracted/README.md
+          echo "- **iOS 版本**: $VERSION ($BUILD)" >> ios_extracted/README.md
           echo "- **提取时间**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> ios_extracted/README.md
           echo "- **运行 ID**: ${{ github.run_id }}" >> ios_extracted/README.md
-          echo "- **运行编号**: ${{ github.run_number }}" >> ios_extracted/README.md
           
           echo "" >> ios_extracted/README.md
           echo "## 提取的文件" >> ios_extracted/README.md
@@ -203,7 +207,8 @@ jobs:
             if [ -f "$f" ]; then
               size=$(ls -lh "$f" | awk '{print $5}')
               name=$(basename "$f")
-              echo "- $name ($size)" >> ios_extracted/README.md
+              file_type=$(file "$f" | cut -d: -f2 | cut -c1-50)
+              echo "- **$name** ($size) - $file_type" >> ios_extracted/README.md
             fi
           done
           
@@ -213,7 +218,7 @@ jobs:
             if [ -d "$f" ]; then
               size=$(du -sh "$f" | cut -f1)
               name=$(basename "$f")
-              echo "- $name ($size)" >> ios_extracted/README.md
+              echo "- **$name** ($size)" >> ios_extracted/README.md
             fi
           done
           
@@ -223,28 +228,33 @@ jobs:
             if [ -f "$f" ]; then
               size=$(ls -lh "$f" | awk '{print $5}')
               name=$(basename "$f")
-              echo "- $name ($size)" >> ios_extracted/README.md
+              echo "- **$name** ($size)" >> ios_extracted/README.md
             fi
           done
           
           echo "" >> ios_extracted/README.md
-          echo "## 字符串提取" >> ios_extracted/README.md
+          echo "## 字符串统计" >> ios_extracted/README.md
           echo "" >> ios_extracted/README.md
-          echo "| 文件 | 字符串数 |" >> ios_extracted/README.md
-          echo "|------|----------|" >> ios_extracted/README.md
+          echo "| 文件 | 关键字符串数 |" >> ios_extracted/README.md
+          echo "|------|-------------|" >> ios_extracted/README.md
           
-          for f in ios_extracted/symbols/*_all_strings.txt; do
+          for f in ios_extracted/symbols/*_key_strings.txt; do
             if [ -f "$f" ]; then
               count=$(wc -l < "$f")
-              name=$(basename "$f" | sed 's/_all_strings.txt//')
+              name=$(basename "$f" | sed 's/_key_strings.txt//')
               echo "| $name | $count |" >> ios_extracted/README.md
             fi
           done
           
           echo "" >> ios_extracted/README.md
-          echo "## 目录结构" >> ios_extracted/README.md
-          echo '```' >> ios_extracted/README.md
-          find ios_extracted -type f -not -name "README.md" | head -50 >> ios_extracted/README.md
+          echo "## 使用说明" >> ios_extracted/README.md
+          echo '```bash' >> ios_extracted/README.md
+          echo "# 解压查看" >> ios_extracted/README.md
+          echo "tar -xzf ios_extracted_${DEVICE}_${VERSION}.tar.gz" >> ios_extracted/README.md
+          echo "cd ios_extracted" >> ios_extracted/README.md
+          echo "" >> ios_extracted/README.md
+          echo "# 查看守护进程字符串" >> ios_extracted/README.md
+          echo "cat symbols/amfid_key_strings.txt | head -50" >> ios_extracted/README.md
           echo '```' >> ios_extracted/README.md
           
           echo "报告生成完成"
@@ -253,17 +263,15 @@ jobs:
       - name: Package results
         run: |
           echo "打包提取的文件..."
-          tar -czf ios_extracted_${DEVICE}_${VERSION}.tar.gz ios_extracted/
-          PACKAGE_SIZE=$(ls -lh ios_extracted_${DEVICE}_${VERSION}.tar.gz | awk '{print $5}')
+          tar -czf ios_extracted_${DEVICE}_${VERSION}_${BUILD}.tar.gz ios_extracted/
+          PACKAGE_SIZE=$(ls -lh ios_extracted_*.tar.gz | awk '{print $5}')
           echo "✅ 打包完成: $PACKAGE_SIZE"
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ios_extracted_${{ env.DEVICE }}_${{ env.VERSION }}
-          path: |
-            ios_extracted_*.tar.gz
-            ios_extracted/README.md
+          path: ios_extracted_*.tar.gz
           retention-days: 7
           compression-level: 6
       
@@ -272,13 +280,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # 只提交报告文件（不提交大文件）
+          # 只提交报告和关键字符串（不提交大文件）
           git add ios_extracted/README.md ios_extracted/symbols/*_key_strings.txt 2>/dev/null || true
           
           if git diff --staged --quiet; then
             echo "没有新文件需要提交"
           else
-            git commit -m "🤖 自动提取 iOS $VERSION 固件组件 [skip ci]"
+            git commit -m "🤖 自动提取 iOS $VERSION ($BUILD) 固件组件 [skip ci]"
             git push
             echo "✅ 已推送到仓库"
           fi
@@ -294,11 +302,11 @@ jobs:
           echo "📊 提取结果:"
           echo "   守护进程: $(ls -1 ios_extracted/daemons/ 2>/dev/null | wc -l) 个"
           echo "   框架: $(ls -1 ios_extracted/frameworks/ 2>/dev/null | wc -l) 个"
-          echo "   总大小: $(du -sh ios_extracted/ | cut -f1)"
+          echo "   关键字符串: $(find ios_extracted/symbols -name '*_key_strings.txt' -exec wc -l {} \; | awk '{sum+=$1} END {print sum}') 行"
           echo ""
           echo "📦 下载方式:"
           echo "   1. Actions → 点击运行 → Artifacts"
-          echo "   2. 下载: ios_extracted_${DEVICE}_${VERSION}.tar.gz"
+          echo "   2. 下载: ios_extracted_${DEVICE}_${VERSION}_${BUILD}.tar.gz"
           echo ""
           echo "📁 或在仓库中查看:"
           echo "   ios_extracted/README.md"
