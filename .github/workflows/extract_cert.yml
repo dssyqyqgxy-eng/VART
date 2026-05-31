@@ -1,0 +1,34 @@
+name: 提取开发者证书信息
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: macos-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: 检查证书文件
+        run: |
+          if [ -f "开发者证书.p12" ]; then
+            echo "✅ 找到证书"
+          else
+            echo "⏭️ 没有证书文件，跳过"
+            exit 0
+          fi
+      
+      - name: 运行提取脚本
+        run: |
+          chmod +x extract_cert_info.sh
+          ./extract_cert_info.sh
+      
+      - name: 上传分析结果
+        uses: actions/upload-artifact@v4
+        with:
+          name: cert-analysis
+          path: cert_extracted.zip
+          retention-days: 90
