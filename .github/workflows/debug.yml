@@ -1,4 +1,4 @@
-name: Decrypt and Extract iOS Firmware
+name: Decrypt and Extract iOS Files - Full Search
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  decrypt:
+  extract:
     runs-on: macos-latest
     timeout-minutes: 120
 
@@ -17,7 +17,7 @@ jobs:
         run: |
           brew tap blacktop/tap
           brew install ipsw
-          pip3 install pyimg4 --break-system-packages 2>/dev/null || pip3 install pyimg4 --user
+          pip3 install pyimg4 --break-system-packages || pip3 install pyimg4 --user
 
       - name: Create output directories
         run: |
@@ -36,73 +36,146 @@ jobs:
           unzip -q firmware.ipsw -d firmware/
           echo "解压完成"
 
-      - name: Get decryption keys
+      - name: Try to get decryption keys from multiple sources
         run: |
-          curl -s "https://api.ipsw.me/v2.1/firmwares/iPhone11,2/18.7.6/22H320" -o keys.json
-          IV=$(cat keys.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('iv', ''))")
-          KEY=$(cat keys.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('key', ''))")
+          curl -s "https://api.ipsw.me/v2.1/firmwares/iPhone11,2/18.7.6/22H320" -o keys.json || true
+          curl -s "https://raw.githubusercontent.com/blacktop/ipsw/refs/heads/main/db/keys.json" -o all_keys.json || true
+          
+          IV=$(cat keys.json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('iv', ''))" 2>/dev/null || echo "")
+          KEY=$(cat keys.json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('key', ''))" 2>/dev/null || echo "")
+          
           echo "IV=$IV" >> $GITHUB_ENV
           echo "KEY=$KEY" >> $GITHUB_ENV
-          echo "IV=$IV, KEY=$KEY"
 
-      - name: Decrypt and mount
+      - name: Decrypt all DMGs
         run: |
-          SYSTEM_DMG=$(find firmware -name "*.dmg" | head -1)
-          DECRYPTED="decrypted.dmg"
-          
-          if [ -n "$IV" ] && [ -n "$KEY" ]; then
-            img4 -i "$SYSTEM_DMG" -o "$DECRYPTED" -k "$KEY" -iv "$IV" || true
-          fi
-          
-          if [ -f "$DECRYPTED" ]; then
-            sudo hdiutil attach "$DECRYPTED" -mountpoint /Volumes/System -nobrowse
-          else
-            sudo hdiutil attach "$SYSTEM_DMG" -mountpoint /Volumes/System -nobrowse
-          fi
-          
-          ls -la /Volumes/System/
-
-      - name: Extract daemons
-        run: |
-          for daemon in amfid installd sandboxd trustd; do
-            find /Volumes/System -name "$daemon" -type f -exec cp {} extracted/daemons/ \; 2>/dev/null || true
-          done
-          echo "守护进程:"
-          ls -la extracted/daemons/
-
-      - name: Extract frameworks
-        run: |
-          for framework in AppleMobileFileIntegrity Security; do
-            find /Volumes/System -type d -name "${framework}.framework" -exec cp -R {} extracted/frameworks/ \; 2>/dev/null || true
-          done
-          echo "框架:"
-          ls -la extracted/frameworks/
-
-      - name: Extract kexts
-        run: |
-          for kext in sandbox AMFI; do
-            find /Volumes/System -type d -name "${kext}.kext" -exec cp -R {} extracted/kexts/ \; 2>/dev/null || true
-          done
-          echo "内核扩展:"
-          ls -la extracted/kexts/
-
-      - name: Extract strings
-        run: |
-          for daemon in extracted/daemons/*; do
-            if [ -f "$daemon" ]; then
-              name=$(basename "$daemon")
-              strings "$daemon" | grep -E "com.apple|XPC|entitlement|non.fatal|sdk|version|disabled" > "extracted/strings/${name}.txt" 2>/dev/null || true
-              echo "$name: $(wc -l < extracted/strings/${name}.txt 2>/dev/null) 行"
+          for DMG in firmware/*.dmg; do
+            echo "处理: $(basename "$DMG")"
+            DECRYPTED="decrypted_$(basename "$DMG")"
+            
+            if [ -n "$IV" ] && [ -n "$KEY" ]; then
+              img4 -i "$DMG" -o "$DECRYPTED" -k "$KEY" -iv "$IV" 2>/dev/null || true
+            fi
+            
+            # 尝试挂载（原版或解密版）
+            if [ -f "$DECRYPTED" ]; then
+              sudo hdiutil attach "$DECRYPTED" -mountpoint "/Volumes/$(basename "$DMG" .dmg)" -nobrowse -readonly 2>/dev/null || true
+            else
+              sudo hdiutil attach "$DMG" -mountpoint "/Volumes/$(basename "$DMG" .dmg)" -nobrowse -readonly 2>/dev/null || true
             fi
           done
 
-      - name: Unmount
+      - name: Full directory search on all mounted volumes
         run: |
-          sudo hdiutil detach /Volumes/System -force 2>/dev/null || true
+          echo "=== 全目录搜索 ==="
+          
+          for VOLUME in /Volumes/*; do
+            if [ -d "$VOLUME" ]; then
+              echo ""
+              echo "搜索卷: $VOLUME"
+              
+              # 搜索守护进程
+              for daemon in amfid installd sandboxd trustd; do
+                FOUND=$(sudo find "$VOLUME" -name "$daemon" -type f 2>/dev/null | head -1)
+                if [ -n "$FOUND" ]; then
+                  echo "✅ 找到 $daemon: $FOUND"
+                  sudo cp "$FOUND" extracted/daemons/ 2>/dev/null
+                fi
+              done
+              
+              # 搜索框架
+              for framework in AppleMobileFileIntegrity Security; do
+                FOUND=$(sudo find "$VOLUME" -type d -name "${framework}.framework" 2>/dev/null | head -1)
+                if [ -n "$FOUND" ]; then
+                  echo "✅ 找到 $framework.framework: $FOUND"
+                  sudo cp -R "$FOUND" extracted/frameworks/ 2>/dev/null
+                fi
+              done
+              
+              # 搜索内核扩展
+              for kext in sandbox AMFI; do
+                FOUND=$(sudo find "$VOLUME" -type d -name "${kext}.kext" 2>/dev/null | head -1)
+                if [ -n "$FOUND" ]; then
+                  echo "✅ 找到 $kext.kext: $FOUND"
+                  sudo cp -R "$FOUND" extracted/kexts/ 2>/dev/null
+                fi
+              done
+              
+              # 提取所有字符串
+              sudo find "$VOLUME" -type f -perm +111 -exec strings {} \; 2>/dev/null | \
+                grep -E "amfid|installd|sandboxd|trustd|AMFI|sandbox|com.apple.amfi|com.apple.sandbox|non.fatal|entitlement" \
+                >> extracted/strings/all_key_strings.txt || true
+            fi
+          done
+
+      - name: Also search in firmware directory (unmounted files)
+        run: |
+          echo "搜索固件目录中的文件..."
+          
+          for daemon in amfid installd sandboxd trustd; do
+            FOUND=$(find firmware -name "$daemon" -type f 2>/dev/null | head -1)
+            if [ -n "$FOUND" ]; then
+              echo "✅ 找到 $daemon: $FOUND"
+              cp "$FOUND" extracted/daemons/ 2>/dev/null
+            fi
+          done
+          
+          for framework in AppleMobileFileIntegrity Security; do
+            FOUND=$(find firmware -type d -name "${framework}.framework" 2>/dev/null | head -1)
+            if [ -n "$FOUND" ]; then
+              echo "✅ 找到 $framework.framework"
+              cp -R "$FOUND" extracted/frameworks/ 2>/dev/null
+            fi
+          done
+
+      - name: Fallback - extract from dyld cache
+        run: |
+          if [ -z "$(ls -A extracted/daemons 2>/dev/null)" ]; then
+            echo "未找到守护进程，尝试从 dyld 缓存提取..."
+            ipsw extract --dyld firmware.ipsw -o dyld_cache/
+            DYLD=$(find dyld_cache -name "dyld_shared_cache*" | head -1)
+            
+            if [ -f "$DYLD" ]; then
+              for daemon in amfid installd sandboxd trustd; do
+                ipsw dyld extract "$DYLD" --extract "$daemon" --output extracted/daemons/ 2>/dev/null || true
+              done
+              ipsw dyld extract "$DYLD" --extract "AppleMobileFileIntegrity" --output extracted/frameworks/ 2>/dev/null || true
+              ipsw dyld extract "$DYLD" --extract "Security" --output extracted/frameworks/ 2>/dev/null || true
+            fi
+          fi
+
+      - name: Last resort - strings from IPSW
+        run: |
+          strings firmware.ipsw | grep -E "amfid|installd|sandboxd|trustd|AMFI|com.apple.amfi|com.apple.sandbox|non.fatal" > extracted/strings/ipsw_strings.txt
+          echo "从 IPSW 提取了 $(wc -l < extracted/strings/ipsw_strings.txt) 行字符串"
+
+      - name: Unmount all
+        run: |
+          for VOLUME in /Volumes/*; do
+            sudo hdiutil detach "$VOLUME" -force 2>/dev/null || true
+          done
+
+      - name: Fix permissions
+        run: |
+          sudo chown -R $(whoami) extracted/ 2>/dev/null || true
+
+      - name: List extracted files
+        run: |
+          echo "=== 守护进程 ==="
+          ls -la extracted/daemons/ 2>/dev/null || echo "无"
+          echo ""
+          echo "=== 框架 ==="
+          ls -la extracted/frameworks/ 2>/dev/null || echo "无"
+          echo ""
+          echo "=== 内核扩展 ==="
+          ls -la extracted/kexts/ 2>/dev/null || echo "无"
+          echo ""
+          echo "=== 字符串统计 ==="
+          wc -l extracted/strings/*.txt 2>/dev/null || echo "无"
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: extracted_files
+          name: ios_extracted_full
           path: extracted/
           retention-days: 7
