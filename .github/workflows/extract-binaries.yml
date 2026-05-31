@@ -26,7 +26,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 安装分析工具
-        run: brew install jtool2 radare2
+        run: brew install radare2
 
       - name: 创建目录
         run: |
@@ -48,6 +48,11 @@ jobs:
           echo "SHA256:" >> analysis_results/${{ matrix.binary }}/00_info.txt
           shasum -a 256 binaries/${{ matrix.binary }} >> analysis_results/${{ matrix.binary }}/00_info.txt
 
+      # ====== 架构信息 ======
+      - name: "[lipo] 查看包含的架构"
+        run: |
+          lipo -info binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/00_architectures.txt
+
       # ====== 字符串分析 ======
       - name: "[strings] XPC 相关"
         run: |
@@ -64,29 +69,44 @@ jobs:
       - name: "[strings] 全部字符串"
         run: strings binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/04_all_strings.txt
 
-      # ====== jtool2 分析 ======
-      - name: "[jtool2] 文件头与签名信息"
-        run: jtool2 --macho binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/05_macho_header.txt
+      # ====== otool 分析（系统自带，不会内存超限） ======
+      - name: "[otool] Fat Header"
+        run: otool -f binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/05_fat_header.txt
 
-      - name: "[jtool2] 导出符号表"
-        run: jtool2 --analyze binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/06_symbols.txt
+      - name: "[otool] Mach-O Header"
+        run: otool -h binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/06_macho_header.txt
 
-      - name: "[jtool2] 搜索 MIS 相关符号"
+      - name: "[otool] Load Commands"
+        run: otool -l binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/07_load_commands.txt
+
+      - name: "[otool] 代码签名信息"
         run: |
-          jtool2 --grep MIS binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/07_MIS_symbols.txt || echo "无匹配" > analysis_results/${{ matrix.binary }}/07_MIS_symbols.txt
+          codesign -dvvv binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/08_codesign.txt 2>&1 || echo "无签名信息" > analysis_results/${{ matrix.binary }}/08_codesign.txt
+
+      - name: "[otool] 依赖的动态库"
+        run: otool -L binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/09_dependencies.txt
+
+      - name: "[otool] 导出符号"
+        run: |
+          nm -g binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/10_exported_symbols.txt 2>&1 || echo "无导出符号" > analysis_results/${{ matrix.binary }}/10_exported_symbols.txt
+
+      # ====== 搜索 MIS 相关符号 ======
+      - name: "[nm] 搜索 MIS 相关符号"
+        run: |
+          nm binaries/${{ matrix.binary }} | grep -i 'MIS' > analysis_results/${{ matrix.binary }}/11_MIS_symbols.txt || echo "无匹配" > analysis_results/${{ matrix.binary }}/11_MIS_symbols.txt
 
       # ====== radare2 分析 ======
       - name: "[r2] 函数列表"
-        run: r2 -q -c 'aaa; afl' binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/08_r2_functions.txt
+        run: r2 -q -c 'aaa; afl' binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/12_r2_functions.txt
 
       - name: "[r2] 字符串列表"
-        run: r2 -q -c 'aaa; iz' binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/09_r2_strings.txt
+        run: r2 -q -c 'aaa; iz' binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/13_r2_strings.txt
 
       - name: "[r2] 导出表"
-        run: r2 -q -c 'aaa; iE' binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/10_r2_exports.txt
+        run: r2 -q -c 'aaa; iE' binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/14_r2_exports.txt
 
       - name: "[r2] 导入表"
-        run: r2 -q -c 'aaa; ii' binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/11_r2_imports.txt
+        run: r2 -q -c 'aaa; ii' binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/15_r2_imports.txt
 
       # ====== 打包上传 ======
       - name: 上传二进制和分析结果
