@@ -1,0 +1,107 @@
+name: Extract iOS Firmware
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: macos-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Create output directories
+        run: |
+          mkdir -p ios_extracted/daemons
+          mkdir -p ios_extracted/frameworks
+          mkdir -p ios_extracted/dyld_cache
+          echo "目录创建完成"
+
+      - name: Download firmware
+        run: |
+          FIRMWARE_URL="https://updates.cdn-apple.com/2026WinterFCS/fullrestores/047-83292/FC308431-84C0-4001-9A24-09FC77486C76/iPhone11,2,iPhone11,4,iPhone11,6_18.7.6_22H320_Restore.ipsw"
+          echo "下载固件..."
+          curl -L -o firmware.ipsw "$FIRMWARE_URL"
+          ls -lh firmware.ipsw
+          echo "✅ 下载完成"
+
+      - name: Extract IPSW
+        run: |
+          echo "解压固件..."
+          unzip -q firmware.ipsw -d firmware/
+          echo "✅ 解压完成"
+          echo ""
+          echo "=== DMG 文件列表 ==="
+          find firmware -name "*.dmg" -type f -exec ls -lh {} \;
+
+      - name: Mount and search
+        run: |
+          echo "=== 挂载并搜索所有 DMG ==="
+          
+          find firmware -name "*.dmg" -type f > /tmp/dmg_list.txt
+          
+          while read DMG; do
+            echo ""
+            echo "处理: $(basename "$DMG")"
+            
+            MOUNT_POINT="/Volumes/$(basename "$DMG" | sed 's/\.dmg//' | sed 's/[^a-zA-Z0-9]/_/g')"
+            
+            sudo hdiutil attach "$DMG" -mountpoint "$MOUNT_POINT" -nobrowse -readonly || continue
+            
+            echo "挂载成功: $MOUNT_POINT"
+            
+            # 搜索守护进程
+            for daemon in amfid installd sandboxd trustd; do
+              FOUND=$(sudo find "$MOUNT_POINT" -name "$daemon" -type f 2>/dev/null | head -1)
+              if [ -n "$FOUND" ]; then
+                echo "✅ 找到 $daemon: $FOUND"
+                sudo cp "$FOUND" ios_extracted/daemons/
+              fi
+            done
+            
+            # 搜索 dyld 缓存
+            DYLD=$(sudo find "$MOUNT_POINT" -name "dyld_shared_cache*" -type f 2>/dev/null | head -1)
+            if [ -n "$DYLD" ]; then
+              echo "✅ 找到 dyld: $DYLD"
+              sudo cp "$DYLD" ios_extracted/dyld_cache/
+            fi
+            
+            # 搜索框架
+            AMFI=$(sudo find "$MOUNT_POINT" -type d -name "AppleMobileFileIntegrity.framework" 2>/dev/null | head -1)
+            if [ -n "$AMFI" ]; then
+              echo "✅ 找到 AMFI: $AMFI"
+              sudo cp -R "$AMFI" ios_extracted/frameworks/
+            fi
+            
+            SECURITY=$(sudo find "$MOUNT_POINT" -type d -name "Security.framework" 2>/dev/null | head -1)
+            if [ -n "$SECURITY" ]; then
+              echo "✅ 找到 Security: $SECURITY"
+              sudo cp -R "$SECURITY" ios_extracted/frameworks/
+            fi
+            
+            sudo hdiutil detach "$MOUNT_POINT" -force 2>/dev/null || true
+            
+          done < /tmp/dmg_list.txt
+          
+          sudo chown -R $(whoami) ios_extracted/
+          
+          echo ""
+          echo "=== 最终结果 ==="
+          echo "守护进程:"
+          ls -la ios_extracted/daemons/ 2>/dev/null || echo "无"
+          echo ""
+          echo "框架:"
+          ls -la ios_extracted/frameworks/ 2>/dev/null || echo "无"
+          echo ""
+          echo "dyld 缓存:"
+          ls -la ios_extracted/dyld_cache/ 2>/dev/null || echo "无"
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios_extracted_files
+          path: ios_extracted/
+          retention-days: 7
