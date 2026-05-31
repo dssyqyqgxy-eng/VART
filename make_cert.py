@@ -28,16 +28,12 @@ OID_APPLE_ISSUED_2  = ObjectIdentifier("1.2.840.113635.100.6.87")
 OID_PROD_MARK       = ObjectIdentifier("1.2.840.113635.100.6.27.11.1")
 OID_LEAF_MARK       = ObjectIdentifier("1.2.840.113635.100.6.27.18")
 
-# 代码签名全平台 + 内核扩展
+# 代码签名全平台 + 内核扩展 (6.1.7 和 6.1.4 已包含，不再单独添加)
 OID_1_x = [ObjectIdentifier(f"1.2.840.113635.100.6.1.{i}") for i in 
            [1,2,3,4,5,6,7,8,9,10,14,21,22,25]]
 
 # IPA 签名核心
 OID_IPA_SIGNING = ObjectIdentifier("1.2.840.113635.100.6.1.13")
-
-# PassKit + 描述文件（来自 Apple Distribution 证书）
-OID_PASSKIT       = ObjectIdentifier("1.2.840.113635.100.6.1.7")
-OID_PROVISIONING  = ObjectIdentifier("1.2.840.113635.100.6.1.4")
 
 # WWDR / 系统安全
 OID_WWDR     = ObjectIdentifier("1.2.840.113635.100.6.2.1")
@@ -120,12 +116,6 @@ def build_cert(subject, issuer, issuer_key, subject_key, is_ca=False):
         for oid in OID_1_x:
             builder = builder.add_extension(
                 x509.UnrecognizedExtension(oid, b'\x05\x00'), critical=False)
-        # Apple Distribution 证书中 confirmed 的 OID (critical)
-        builder = builder.add_extension(
-            x509.UnrecognizedExtension(OID_PASSKIT, b'\x05\x00'), critical=True)
-        builder = builder.add_extension(
-            x509.UnrecognizedExtension(OID_PROVISIONING, b'\x05\x00'), critical=True)
-        # 其余 OID
         builder = builder.add_extension(
             x509.UnrecognizedExtension(OID_IPA_SIGNING, TEAM_ID.encode()), critical=False)
         builder = builder.add_extension(
