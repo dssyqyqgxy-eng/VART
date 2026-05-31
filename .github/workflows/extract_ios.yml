@@ -16,7 +16,7 @@ env:
 jobs:
   extract:
     runs-on: macos-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     
     steps:
       - name: Checkout repository
@@ -40,7 +40,6 @@ jobs:
           echo "使用直接链接下载固件..."
           echo "URL: $FIRMWARE_URL"
           
-          # 使用 curl 下载，带重试和断点续传
           curl -L -C - -o firmware.ipsw \
             --retry 5 \
             --retry-delay 10 \
@@ -48,76 +47,52 @@ jobs:
             --max-time 3600 \
             "$FIRMWARE_URL"
           
-          # 检查下载是否成功
           if [ -f "firmware.ipsw" ]; then
             SIZE=$(ls -lh firmware.ipsw | awk '{print $5}')
             echo "✅ 固件下载成功! 大小: $SIZE"
-            
-            # 可选：验证文件大小（iOS 18 IPSW 通常 6-8GB）
-            SIZE_BYTES=$(stat -f%z firmware.ipsw 2>/dev/null || stat -c%s firmware.ipsw 2>/dev/null)
-            if [ "$SIZE_BYTES" -lt 5000000000 ]; then
-              echo "⚠️ 警告: 文件小于 5GB，可能下载不完整"
-            fi
           else
             echo "❌ 固件下载失败"
             exit 1
           fi
-      
-      - name: Verify IPSW integrity
-        run: |
-          echo "验证 IPSW 文件..."
-          file firmware.ipsw
-          
-          # 检查是否为有效的 zip 文件
-          unzip -tq firmware.ipsw 2>&1 | head -5 || true
-          echo "✅ IPSW 验证完成"
       
       - name: Extract dyld cache
         run: |
           echo "解压 IPSW..."
           unzip -q firmware.ipsw -d firmware/
           
-          echo "查找系统 DMG..."
-          SYSTEM_DMG=$(find firmware -name "*.dmg" | grep -E "_System|_OS" | head -1)
-          
-          if [ -z "$SYSTEM_DMG" ]; then
-            SYSTEM_DMG=$(find firmware -name "*.dmg" | head -1)
-          fi
-          
+          SYSTEM_DMG=$(find firmware -name "*.dmg" | head -1)
           echo "系统 DMG: $SYSTEM_DMG"
           
-          # 挂载 DMG
-          echo "挂载 DMG..."
           hdiutil attach "$SYSTEM_DMG" -mountpoint /Volumes/System -nobrowse
           
-          # 复制 dyld 缓存
-          if [ -f "/Volumes/System/System/Library/dyld/dyld_shared_cache_arm64e" ]; then
-            cp "/Volumes/System/System/Library/dyld/dyld_shared_cache_arm64e" ios_extracted/dyld_cache/
-            echo "✅ 复制 dyld_shared_cache_arm64e"
-          elif [ -f "/Volumes/System/System/Library/dyld/dyld_shared_cache_arm64" ]; then
-            cp "/Volumes/System/System/Library/dyld/dyld_shared_cache_arm64" ios_extracted/dyld_cache/
-            echo "✅ 复制 dyld_shared_cache_arm64"
+          echo "全目录查找 dyld 缓存..."
+          DYLD_PATH=$(sudo find /Volumes/System -name "dyld_shared_cache*" -type f 2>/dev/null | head -1)
+          
+          if [ -n "$DYLD_PATH" ]; then
+            cp "$DYLD_PATH" ios_extracted/dyld_cache/
+            SIZE=$(ls -lh ios_extracted/dyld_cache/$(basename "$DYLD_PATH") | awk '{print $5}')
+            echo "✅ dyld 缓存 ($SIZE) - 路径: $DYLD_PATH"
           else
             echo "⚠️ 未找到 dyld 缓存"
           fi
           
-          # 卸载 DMG
           hdiutil detach /Volumes/System || true
         continue-on-error: true
       
       - name: Extract daemons
         run: |
-          # 重新挂载系统 DMG
           SYSTEM_DMG=$(find firmware -name "*.dmg" | head -1)
-          hdiutil attach "$SYSTEM_DMG" -mountpoint /Volumes/System -nobrowse 2>/dev/null || true
+          hdiutil attach "$SYSTEM_DMG" -mountpoint /Volumes/System -nobrowse
           
-          echo "复制守护进程..."
+          echo "全目录查找守护进程..."
           
           for daemon in amfid installd sandboxd trustd; do
-            if [ -f "/Volumes/System/usr/libexec/$daemon" ]; then
-              cp "/Volumes/System/usr/libexec/$daemon" ios_extracted/daemons/
+            FOUND=$(sudo find /Volumes/System -name "$daemon" -type f 2>/dev/null | head -1)
+            
+            if [ -n "$FOUND" ]; then
+              cp "$FOUND" ios_extracted/daemons/
               SIZE=$(ls -lh ios_extracted/daemons/$daemon | awk '{print $5}')
-              echo "✅ $daemon ($SIZE)"
+              echo "✅ $daemon ($SIZE) - 路径: $FOUND"
             else
               echo "⚠️ 未找到 $daemon"
             fi
@@ -133,22 +108,26 @@ jobs:
       - name: Extract frameworks
         run: |
           SYSTEM_DMG=$(find firmware -name "*.dmg" | head -1)
-          hdiutil attach "$SYSTEM_DMG" -mountpoint /Volumes/System -nobrowse 2>/dev/null || true
+          hdiutil attach "$SYSTEM_DMG" -mountpoint /Volumes/System -nobrowse
           
-          echo "复制框架..."
+          echo "全目录查找框架..."
           
           # AMFI 框架
-          AMFI_PATH="/Volumes/System/System/Library/PrivateFrameworks/AppleMobileFileIntegrity.framework"
-          if [ -d "$AMFI_PATH" ]; then
+          AMFI_PATH=$(sudo find /Volumes/System -type d -name "AppleMobileFileIntegrity.framework" 2>/dev/null | head -1)
+          if [ -n "$AMFI_PATH" ]; then
             cp -R "$AMFI_PATH" ios_extracted/frameworks/
-            echo "✅ AMFI 框架"
+            echo "✅ AMFI 框架 - 路径: $AMFI_PATH"
+          else
+            echo "⚠️ 未找到 AMFI 框架"
           fi
           
           # Security 框架
-          SECURITY_PATH="/Volumes/System/System/Library/Frameworks/Security.framework"
-          if [ -d "$SECURITY_PATH" ]; then
+          SECURITY_PATH=$(sudo find /Volumes/System -type d -name "Security.framework" 2>/dev/null | head -1)
+          if [ -n "$SECURITY_PATH" ]; then
             cp -R "$SECURITY_PATH" ios_extracted/frameworks/
-            echo "✅ Security 框架"
+            echo "✅ Security 框架 - 路径: $SECURITY_PATH"
+          else
+            echo "⚠️ 未找到 Security 框架"
           fi
           
           hdiutil detach /Volumes/System || true
@@ -162,20 +141,15 @@ jobs:
         run: |
           echo "提取字符串和符号..."
           
-          # 从守护进程提取字符串
           for daemon in amfid installd sandboxd trustd; do
             if [ -f "ios_extracted/daemons/$daemon" ]; then
-              # 所有字符串
               strings ios_extracted/daemons/$daemon > ios_extracted/symbols/${daemon}_all_strings.txt 2>/dev/null
-              # 关键字符串（XPC、entitlements等）
               strings ios_extracted/daemons/$daemon | grep -E "com.apple|XPC|entitlement|AMFI|sandbox|version|error|fail" > ios_extracted/symbols/${daemon}_key_strings.txt 2>/dev/null
-              
               COUNT=$(wc -l < ios_extracted/symbols/${daemon}_key_strings.txt 2>/dev/null || echo "0")
               echo "✅ $daemon: $COUNT 关键字符串"
             fi
           done
           
-          # 从 dyld 缓存提取关键字符串
           DYLD=$(find ios_extracted/dyld_cache -name "dyld_shared_cache*" -type f | head -1)
           if [ -n "$DYLD" ]; then
             echo "从 dyld 缓存提取关键字符串..."
@@ -280,7 +254,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # 只提交报告和关键字符串（不提交大文件）
           git add ios_extracted/README.md ios_extracted/symbols/*_key_strings.txt 2>/dev/null || true
           
           if git diff --staged --quiet; then
@@ -302,7 +275,7 @@ jobs:
           echo "📊 提取结果:"
           echo "   守护进程: $(ls -1 ios_extracted/daemons/ 2>/dev/null | wc -l) 个"
           echo "   框架: $(ls -1 ios_extracted/frameworks/ 2>/dev/null | wc -l) 个"
-          echo "   关键字符串: $(find ios_extracted/symbols -name '*_key_strings.txt' -exec wc -l {} \; | awk '{sum+=$1} END {print sum}') 行"
+          echo "   关键字符串: $(find ios_extracted/symbols -name '*_key_strings.txt' -exec wc -l {} \; 2>/dev/null | awk '{sum+=$1} END {print sum}') 行"
           echo ""
           echo "📦 下载方式:"
           echo "   1. Actions → 点击运行 → Artifacts"
