@@ -33,15 +33,47 @@ jobs:
           mkdir -p binaries
           mkdir -p analysis_results/${{ matrix.binary }}
 
+      # ====== 探路：先列出可能的位置 ======
+      - name: 查找目标二进制
+        id: find
+        run: |
+          # 先尝试原路径
+          if [ -f "${{ matrix.path }}" ]; then
+            echo "found_path=${{ matrix.path }}" >> $GITHUB_OUTPUT
+            echo "找到: ${{ matrix.path }}"
+          # installd 可能在 /System/Library/PrivateFrameworks 相关路径
+          elif [ -f "/System/Library/PrivateFrameworks/MobileSoftwareUpdate.framework/Support/${{ matrix.binary }}" ]; then
+            echo "found_path=/System/Library/PrivateFrameworks/MobileSoftwareUpdate.framework/Support/${{ matrix.binary }}" >> $GITHUB_OUTPUT
+            echo "找到: /System/Library/PrivateFrameworks/MobileSoftwareUpdate.framework/Support/${{ matrix.binary }}"
+          # 用 find 搜索（限 /usr/libexec 和 /System/Library）
+          else
+            FOUND=$(find /usr/libexec /System/Library -name "${{ matrix.binary }}" -type f 2>/dev/null | head -1)
+            if [ -n "$FOUND" ]; then
+              echo "found_path=$FOUND" >> $GITHUB_OUTPUT
+              echo "找到: $FOUND"
+            else
+              echo "found_path=NOT_FOUND" >> $GITHUB_OUTPUT
+              echo "警告: 未找到 ${{ matrix.binary }}"
+            fi
+          fi
+
       # ====== 提取二进制文件 ======
       - name: 提取目标二进制
-        run: cp ${{ matrix.path }} binaries/${{ matrix.binary }}
+        if: steps.find.outputs.found_path != 'NOT_FOUND'
+        run: cp ${{ steps.find.outputs.found_path }} binaries/${{ matrix.binary }}
+
+      - name: 跳过不存在的文件
+        if: steps.find.outputs.found_path == 'NOT_FOUND'
+        run: |
+          echo "文件 ${{ matrix.binary }} 不存在于当前系统" > analysis_results/${{ matrix.binary }}/NOT_FOUND.txt
+          touch binaries/${{ matrix.binary }}.missing
 
       # ====== 基本信息 ======
       - name: 计算文件哈希和系统信息
+        if: steps.find.outputs.found_path != 'NOT_FOUND'
         run: |
           echo "文件: ${{ matrix.binary }}" > analysis_results/${{ matrix.binary }}/00_info.txt
-          echo "路径: ${{ matrix.path }}" >> analysis_results/${{ matrix.binary }}/00_info.txt
+          echo "路径: ${{ steps.find.outputs.found_path }}" >> analysis_results/${{ matrix.binary }}/00_info.txt
           echo "系统版本:" >> analysis_results/${{ matrix.binary }}/00_info.txt
           sw_vers >> analysis_results/${{ matrix.binary }}/00_info.txt
           echo "" >> analysis_results/${{ matrix.binary }}/00_info.txt
@@ -50,62 +82,78 @@ jobs:
 
       # ====== 架构信息 ======
       - name: "[lipo] 查看包含的架构"
+        if: steps.find.outputs.found_path != 'NOT_FOUND'
         run: |
           lipo -info binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/00_architectures.txt
 
       # ====== 字符串分析 ======
       - name: "[strings] XPC 相关"
+        if: steps.find.outputs.found_path != 'NOT_FOUND'
         run: |
           strings binaries/${{ matrix.binary }} | grep -i 'xpc\|com\.apple\|machservice' > analysis_results/${{ matrix.binary }}/01_xpc_strings.txt || echo "无匹配" > analysis_results/${{ matrix.binary }}/01_xpc_strings.txt
 
       - name: "[strings] 安全相关"
+        if: steps.find.outputs.found_path != 'NOT_FOUND'
         run: |
           strings binaries/${{ matrix.binary }} | grep -iE 'valid|sign|entitle|sandbox|trust|policy|verify|permit' > analysis_results/${{ matrix.binary }}/02_security_strings.txt || echo "无匹配" > analysis_results/${{ matrix.binary }}/02_security_strings.txt
 
       - name: "[strings] 错误/日志相关"
+        if: steps.find.outputs.found_path != 'NOT_FOUND'
         run: |
           strings binaries/${{ matrix.binary }} | grep -iE 'error|fail|reject|deny|debug|log|assert' > analysis_results/${{ matrix.binary }}/03_error_strings.txt || echo "无匹配" > analysis_results/${{ matrix.binary }}/03_error_strings.txt
 
       - name: "[strings] 全部字符串"
+        if: steps.find.outputs.found_path != 'NOT_FOUND'
         run: strings binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/04_all_strings.txt
 
-      # ====== otool 分析（系统自带，不会内存超限） ======
+      # ====== otool 分析 ======
       - name: "[otool] Fat Header"
+        if: steps.find.outputs.found_path != 'NOT_FOUND'
         run: otool -f binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/05_fat_header.txt
 
       - name: "[otool] Mach-O Header"
+        if: steps.find.outputs.found_path != 'NOT_FOUND'
         run: otool -h binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/06_macho_header.txt
 
       - name: "[otool] Load Commands"
+        if: steps.find.outputs.found_path != 'NOT_FOUND'
         run: otool -l binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/07_load_commands.txt
 
-      - name: "[otool] 代码签名信息"
+      - name: "[codesign] 代码签名信息"
+        if: steps.find.outputs.found_path != 'NOT_FOUND'
         run: |
-          codesign -dvvv binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/08_codesign.txt 2>&1 || echo "无签名信息" > analysis_results/${{ matrix.binary }}/08_codesign.txt
+          codesign -dvvv binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/08_codesign.txt 2>&1 || echo "无签名或无权读取签名" > analysis_results/${{ matrix.binary }}/08_codesign.txt
 
       - name: "[otool] 依赖的动态库"
+        if: steps.find.outputs.found_path != 'NOT_FOUND'
         run: otool -L binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/09_dependencies.txt
 
-      - name: "[otool] 导出符号"
+      - name: "[nm] 导出符号"
+        if: steps.find.outputs.found_path != 'NOT_FOUND'
         run: |
           nm -g binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/10_exported_symbols.txt 2>&1 || echo "无导出符号" > analysis_results/${{ matrix.binary }}/10_exported_symbols.txt
 
       # ====== 搜索 MIS 相关符号 ======
       - name: "[nm] 搜索 MIS 相关符号"
+        if: steps.find.outputs.found_path != 'NOT_FOUND'
         run: |
           nm binaries/${{ matrix.binary }} | grep -i 'MIS' > analysis_results/${{ matrix.binary }}/11_MIS_symbols.txt || echo "无匹配" > analysis_results/${{ matrix.binary }}/11_MIS_symbols.txt
 
       # ====== radare2 分析 ======
       - name: "[r2] 函数列表"
+        if: steps.find.outputs.found_path != 'NOT_FOUND'
         run: r2 -q -c 'aaa; afl' binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/12_r2_functions.txt
 
       - name: "[r2] 字符串列表"
+        if: steps.find.outputs.found_path != 'NOT_FOUND'
         run: r2 -q -c 'aaa; iz' binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/13_r2_strings.txt
 
       - name: "[r2] 导出表"
+        if: steps.find.outputs.found_path != 'NOT_FOUND'
         run: r2 -q -c 'aaa; iE' binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/14_r2_exports.txt
 
       - name: "[r2] 导入表"
+        if: steps.find.outputs.found_path != 'NOT_FOUND'
         run: r2 -q -c 'aaa; ii' binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/15_r2_imports.txt
 
       # ====== 打包上传 ======
@@ -114,5 +162,5 @@ jobs:
         with:
           name: full-package-${{ matrix.binary }}
           path: |
-            binaries/${{ matrix.binary }}
+            binaries/
             analysis_results/${{ matrix.binary }}/
