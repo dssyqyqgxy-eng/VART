@@ -1,10 +1,10 @@
 name: 提取 macOS 系统二进制并分析
 
 on:
-  push:                    # 推送代码到仓库时自动跑
+  push:
     paths:
-      - '.github/workflows/extract-binaries.yml'  # 工作流文件本身被推送时触发
-  workflow_dispatch:        # 手动触发
+      - '.github/workflows/extract-binaries.yml'
+  workflow_dispatch:
 
 jobs:
   extract-and-analyze:
@@ -49,39 +49,43 @@ jobs:
           shasum -a 256 binaries/${{ matrix.binary }} >> analysis_results/${{ matrix.binary }}/00_info.txt
 
       # ====== 字符串分析 ======
-      - name: [strings] XPC 相关
-        run: strings binaries/${{ matrix.binary }} | grep -i 'xpc\|com\.apple\|machservice' > analysis_results/${{ matrix.binary }}/01_xpc_strings.txt || echo "无匹配" > analysis_results/${{ matrix.binary }}/01_xpc_strings.txt
+      - name: "[strings] XPC 相关"
+        run: |
+          strings binaries/${{ matrix.binary }} | grep -i 'xpc\|com\.apple\|machservice' > analysis_results/${{ matrix.binary }}/01_xpc_strings.txt || echo "无匹配" > analysis_results/${{ matrix.binary }}/01_xpc_strings.txt
 
-      - name: [strings] 安全相关
-        run: strings binaries/${{ matrix.binary }} | grep -iE 'valid|sign|entitle|sandbox|trust|policy|verify|permit' > analysis_results/${{ matrix.binary }}/02_security_strings.txt || echo "无匹配" > analysis_results/${{ matrix.binary }}/02_security_strings.txt
+      - name: "[strings] 安全相关"
+        run: |
+          strings binaries/${{ matrix.binary }} | grep -iE 'valid|sign|entitle|sandbox|trust|policy|verify|permit' > analysis_results/${{ matrix.binary }}/02_security_strings.txt || echo "无匹配" > analysis_results/${{ matrix.binary }}/02_security_strings.txt
 
-      - name: [strings] 错误/日志相关
-        run: strings binaries/${{ matrix.binary }} | grep -iE 'error|fail|reject|deny|debug|log|assert' > analysis_results/${{ matrix.binary }}/03_error_strings.txt || echo "无匹配" > analysis_results/${{ matrix.binary }}/03_error_strings.txt
+      - name: "[strings] 错误/日志相关"
+        run: |
+          strings binaries/${{ matrix.binary }} | grep -iE 'error|fail|reject|deny|debug|log|assert' > analysis_results/${{ matrix.binary }}/03_error_strings.txt || echo "无匹配" > analysis_results/${{ matrix.binary }}/03_error_strings.txt
 
-      - name: [strings] 全部字符串
+      - name: "[strings] 全部字符串"
         run: strings binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/04_all_strings.txt
 
       # ====== jtool2 分析 ======
-      - name: [jtool2] 文件头与签名信息
+      - name: "[jtool2] 文件头与签名信息"
         run: jtool2 --macho binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/05_macho_header.txt
 
-      - name: [jtool2] 导出符号表
+      - name: "[jtool2] 导出符号表"
         run: jtool2 --analyze binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/06_symbols.txt
 
-      - name: [jtool2] 搜索 MIS 相关符号
-        run: jtool2 --grep MIS binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/07_MIS_symbols.txt || echo "无匹配" > analysis_results/${{ matrix.binary }}/07_MIS_symbols.txt
+      - name: "[jtool2] 搜索 MIS 相关符号"
+        run: |
+          jtool2 --grep MIS binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/07_MIS_symbols.txt || echo "无匹配" > analysis_results/${{ matrix.binary }}/07_MIS_symbols.txt
 
       # ====== radare2 分析 ======
-      - name: [r2] 函数列表
+      - name: "[r2] 函数列表"
         run: r2 -q -c 'aaa; afl' binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/08_r2_functions.txt
 
-      - name: [r2] 字符串列表
+      - name: "[r2] 字符串列表"
         run: r2 -q -c 'aaa; iz' binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/09_r2_strings.txt
 
-      - name: [r2] 导出表
+      - name: "[r2] 导出表"
         run: r2 -q -c 'aaa; iE' binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/10_r2_exports.txt
 
-      - name: [r2] 导入表
+      - name: "[r2] 导入表"
         run: r2 -q -c 'aaa; ii' binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/11_r2_imports.txt
 
       # ====== 打包上传 ======
