@@ -33,48 +33,115 @@ jobs:
       - name: Extract IPSW
         run: |
           unzip -q firmware.ipsw -d firmware/
+          echo "IPSW内容:"
+          ls -lh firmware/
 
       - name: Decrypt all DMGs
         run: |
+          echo "原始DMG文件列表:"
+          ls -lh firmware/*.dmg 2>/dev/null || echo "未找到DMG文件"
+          echo "---"
+          
           for DMG in firmware/*.dmg; do
-            echo "解密: $(basename "$DMG")"
-            img4 -i "$DMG" -o "decrypted_$(basename "$DMG")" 2>/dev/null || true
+            if [ -f "$DMG" ]; then
+              BASENAME=$(basename "$DMG")
+              echo "解密: $BASENAME"
+              img4 -i "$DMG" -o "decrypted_$BASENAME" 2>/dev/null
+              if [ -f "decrypted_$BASENAME" ]; then
+                echo "  解密成功"
+              else
+                echo "  解密失败，尝试其他方法..."
+                python3 -c "from pyimg4 import Img4; img4 = Img4('$DMG'); img4.decrypt('decrypted_$BASENAME')" 2>/dev/null
+              fi
+            fi
           done
+          
+          echo "---"
+          echo "解密后的DMG文件:"
+          ls -lh decrypted_*.dmg 2>/dev/null || echo "无解密文件"
 
       - name: Mount ALL decrypted DMGs
         run: |
+          echo "准备挂载的解密DMG:"
+          ls -lh decrypted_*.dmg 2>/dev/null || echo "未找到解密后的DMG"
+          echo "---"
+          
           INDEX=1
           for DMG in decrypted_*.dmg; do
-            if [ -f "$DMG" ]; then
-              echo "挂载解密后: $(basename "$DMG")"
-              sudo hdiutil attach "$DMG" -mountpoint "/Volumes/dmg_$INDEX" -nobrowse -readonly 2>/dev/null || true
+            if [ -f "$DMG" ] && [ -s "$DMG" ]; then
+              BASENAME=$(basename "$DMG")
+              MOUNTPOINT="/Volumes/dmg_$INDEX"
+              echo "挂载 ($INDEX): $BASENAME -> $MOUNTPOINT"
+              
+              if [ -d "$MOUNTPOINT" ]; then
+                sudo hdiutil detach "$MOUNTPOINT" -force 2>/dev/null || true
+                sleep 1
+              fi
+              
+              sudo hdiutil attach "$DMG" -mountpoint "$MOUNTPOINT" -nobrowse -readonly 2>/dev/null
+              
+              if [ -d "$MOUNTPOINT" ] && [ "$(ls -A "$MOUNTPOINT" 2>/dev/null)" ]; then
+                echo "  挂载成功"
+                INDEX=$((INDEX + 1))
+              else
+                echo "  挂载失败"
+              fi
             fi
-            INDEX=$((INDEX + 1))
           done
+          
+          echo "---"
+          echo "所有已挂载的卷:"
+          ls -d /Volumes/dmg_* 2>/dev/null || echo "无dmg_挂载点"
 
-      - name: Search all mounted DMGs
+      - name: Search ALL mounted DMGs
         run: |
+          echo "开始搜索所有挂载点..."
+          echo "---"
+          
           for VOL in /Volumes/dmg_*; do
             if [ -d "$VOL" ]; then
+              echo "========================================="
               echo "搜索: $VOL"
-              sudo find "$VOL" -name "amfid" -type f -exec cp {} extracted/daemons/ \; 2>/dev/null || true
-              sudo find "$VOL" -name "installd" -type f -exec cp {} extracted/daemons/ \; 2>/dev/null || true
-              sudo find "$VOL" -name "sandboxd" -type f -exec cp {} extracted/daemons/ \; 2>/dev/null || true
-              sudo find "$VOL" -name "trustd" -type f -exec cp {} extracted/daemons/ \; 2>/dev/null || true
-              sudo find "$VOL" -type d -name "AppleMobileFileIntegrity.framework" -exec cp -R {} extracted/frameworks/ \; 2>/dev/null || true
-              sudo find "$VOL" -type d -name "Security.framework" -exec cp -R {} extracted/frameworks/ \; 2>/dev/null || true
-              sudo find "$VOL" -type d -name "sandbox.kext" -exec cp -R {} extracted/kexts/ \; 2>/dev/null || true
-              sudo find "$VOL" -type d -name "AMFI.kext" -exec cp -R {} extracted/kexts/ \; 2>/dev/null || true
+              echo "========================================="
+              
+              echo "[daemons] 搜索中..."
+              sudo find "$VOL" -name "amfid" -type f -exec cp {} extracted/daemons/ \; 2>/dev/null
+              sudo find "$VOL" -name "installd" -type f -exec cp {} extracted/daemons/ \; 2>/dev/null
+              sudo find "$VOL" -name "sandboxd" -type f -exec cp {} extracted/daemons/ \; 2>/dev/null
+              sudo find "$VOL" -name "trustd" -type f -exec cp {} extracted/daemons/ \; 2>/dev/null
+              
+              echo "[frameworks] 搜索中..."
+              sudo find "$VOL" -type d -name "AppleMobileFileIntegrity.framework" -exec cp -R {} extracted/frameworks/ \; 2>/dev/null
+              sudo find "$VOL" -type d -name "Security.framework" -exec cp -R {} extracted/frameworks/ \; 2>/dev/null
+              
+              echo "[kexts] 搜索中..."
+              sudo find "$VOL" -type d -name "sandbox.kext" -exec cp -R {} extracted/kexts/ \; 2>/dev/null
+              sudo find "$VOL" -type d -name "AMFI.kext" -exec cp -R {} extracted/kexts/ \; 2>/dev/null
             fi
           done
+          
+          echo "---"
+          echo "提取结果汇总:"
+          echo "Daemons:"
+          ls -lh extracted/daemons/ 2>/dev/null || echo "  无文件"
+          echo "Frameworks:"
+          ls -lh extracted/frameworks/ 2>/dev/null || echo "  无文件"
+          echo "Kexts:"
+          ls -lh extracted/kexts/ 2>/dev/null || echo "  无文件"
 
       - name: Unmount all
+        if: always()
         run: |
+          echo "卸载所有挂载点..."
           for VOL in /Volumes/dmg_*; do
-            sudo hdiutil detach "$VOL" -force 2>/dev/null || true
+            if [ -d "$VOL" ]; then
+              echo "卸载: $VOL"
+              sudo hdiutil detach "$VOL" -force 2>/dev/null || true
+            fi
           done
+          echo "卸载完成"
 
-      - name: Upload
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: extracted_files
