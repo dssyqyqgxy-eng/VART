@@ -31,91 +31,106 @@ jobs:
       - name: Create output directories
         run: mkdir -p ios_extracted/{daemons,frameworks,dyld_cache}
       
-      # ========== 使用 Go 直接安装 ipsw（最可靠） ==========
-      - name: Install ipsw via Go
+      # ========== 方法1: 使用 GitHub 代理下载 ipsw ==========
+      - name: Install ipsw via proxy
         run: |
-          # 安装 Go
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq golang-go
+          echo "下载 ipsw..."
           
-          # 使用 go install 安装 ipsw（绕过 GitHub release 下载问题）
-          go install github.com/blacktop/ipsw/cmd/ipsw@latest
+          # 使用 ghproxy 代理下载（绕过网络限制）
+          curl -L -o ipsw.tar.gz \
+            https://ghproxy.net/https://github.com/blacktop/ipsw/releases/download/v3.1.628/ipsw_3.1.628_linux_amd64.tar.gz
           
-          # 添加到 PATH
-          echo "$HOME/go/bin" >> $GITHUB_PATH
-          export PATH="$HOME/go/bin:$PATH"
+          # 检查文件大小（应该大于 10MB）
+          FILE_SIZE=$(stat -c%s ipsw.tar.gz 2>/dev/null || stat -f%z ipsw.tar.gz 2>/dev/null)
+          echo "文件大小: $FILE_SIZE 字节"
           
-          # 验证
-          $HOME/go/bin/ipsw version || echo "安装中..."
-          
-          # 如果 go install 成功，创建符号链接
-          if [ -f "$HOME/go/bin/ipsw" ]; then
-            sudo ln -sf $HOME/go/bin/ipsw /usr/local/bin/ipsw
+          if [ -f "ipsw.tar.gz" ] && [ "$FILE_SIZE" -gt 10000000 ]; then
+            tar -xzf ipsw.tar.gz
+            sudo mv ipsw /usr/local/bin/
+            chmod +x /usr/local/bin/ipsw
+            rm -f ipsw.tar.gz
             echo "✅ ipsw 安装成功"
+            ipsw version
+          else
+            echo "❌ 下载失败，文件太小"
+            exit 1
           fi
       
-      # 备用方案：使用预编译二进制（带 User-Agent）
-      - name: Install ipsw (fallback)
-        if: steps.install-go.outcome != 'success'
+      # ========== 方法2: 使用 cdn 镜像 ==========
+      - name: Install ipsw (mirror fallback)
+        if: failure()
         run: |
-          echo "使用备用方案安装 ipsw..."
+          echo "使用镜像下载..."
           
-          # 添加 User-Agent 避免被 GitHub API 限流
-          wget --header="User-Agent: Mozilla/5.0" \
-               --tries=5 \
-               --retry-connrefused \
-               https://github.com/blacktop/ipsw/releases/download/v3.1.628/ipsw_3.1.628_linux_amd64.tar.gz
+          # 使用 fastgit 镜像
+          wget https://hub.fastgit.xyz/blacktop/ipsw/releases/download/v3.1.628/ipsw_3.1.628_linux_amd64.tar.gz
           
-          if [ -f "ipsw_3.1.628_linux_amd64.tar.gz" ] && [ $(stat -c%s "ipsw_3.1.628_linux_amd64.tar.gz") -gt 100000 ]; then
+          FILE_SIZE=$(stat -c%s ipsw_3.1.628_linux_amd64.tar.gz 2>/dev/null || echo 0)
+          
+          if [ "$FILE_SIZE" -gt 10000000 ]; then
             tar -xzf ipsw_*.tar.gz
             sudo mv ipsw /usr/local/bin/
             chmod +x /usr/local/bin/ipsw
             rm -f ipsw_*.tar.gz
             echo "✅ ipsw 安装成功"
           else
-            echo "❌ 下载失败，文件大小异常"
-            exit 0
+            echo "❌ 镜像下载也失败"
+            exit 1
           fi
       
-      # ========== 检查并下载固件 ==========
-      - name: Download firmware
+      # ========== 检查固件版本 ==========
+      - name: Check firmware version
         run: |
           echo "设备: $DEVICE"
           echo "版本: $VERSION"
           
-          # 使用 ipsw 下载固件
-          ipsw download $DEVICE --version $VERSION -o firmware.ipsw || {
-            echo "⚠️ 版本 $VERSION 不存在，尝试获取最新版本..."
-            # 获取最新可用版本
+          # 列出可用的版本
+          echo "可用的 iOS 版本:"
+          ipsw download --list --device $DEVICE 2>/dev/null | head -20
+      
+      # ========== 下载固件 ==========
+      - name: Download firmware
+        run: |
+          # 尝试下载指定版本
+          if ipsw download $DEVICE --version $VERSION -o firmware.ipsw 2>&1; then
+            echo "✅ 下载成功: $VERSION"
+          else
+            echo "⚠️ 版本 $VERSION 不存在，尝试下载最新版..."
+            # 获取最新版本
             LATEST=$(ipsw download --list --device $DEVICE 2>/dev/null | grep -E "iOS [0-9]" | head -1 | awk '{print $2}')
             echo "最新版本: $LATEST"
             ipsw download $DEVICE --version $LATEST -o firmware.ipsw
-          }
+            echo "LATEST_VERSION=$LATEST" >> $GITHUB_ENV
+          fi
           
-          ls -lh firmware.ipsw || echo "下载失败"
+          ls -lh firmware.ipsw
         continue-on-error: true
       
       # ========== 提取 dyld 缓存 ==========
       - name: Extract dyld cache
         run: |
           if [ ! -f "firmware.ipsw" ]; then
-            echo "没有固件文件，跳过"
+            echo "没有固件文件"
             exit 0
           fi
           
           # 解压 IPSW
-          unzip -o firmware.ipsw -d firmware/
+          unzip -q -o firmware.ipsw -d firmware/
           
-          # 找到系统 DMG
-          SYSTEM_DMG=$(find firmware -name "*_.dmg" -o -name "*_System.dmg" | head -1)
+          # 查找系统 DMG
+          SYSTEM_DMG=$(find firmware -name "*.dmg" | grep -E "(_System|_.*_.*\.dmg)" | head -1)
           
-          if [ -n "$SYSTEM_DMG" ]; then
-            echo "提取 dyld 缓存从: $SYSTEM_DMG"
-            ipsw extract dyld_shared_cache "$SYSTEM_DMG" -o ios_extracted/dyld_cache/ || true
+          if [ -z "$SYSTEM_DMG" ]; then
+            SYSTEM_DMG=$(find firmware -name "*.dmg" | head -1)
           fi
           
-          # 查找结果
-          find ios_extracted -name "dyld_shared_cache*" -type f
+          echo "系统 DMG: $SYSTEM_DMG"
+          
+          # 提取 dyld 缓存
+          ipsw extract dyld_shared_cache "$SYSTEM_DMG" -o ios_extracted/dyld_cache/ || true
+          
+          # 显示结果
+          find ios_extracted -name "dyld_shared_cache*" -type f -exec ls -lh {} \;
         continue-on-error: true
       
       # ========== 提取守护进程 ==========
@@ -128,15 +143,15 @@ jobs:
             exit 0
           fi
           
-          echo "使用缓存: $DYLD"
+          echo "缓存文件: $DYLD"
           
           for daemon in amfid installd sandboxd trustd; do
             echo "提取 $daemon..."
-            ipsw dyld extract "$DYLD" --extract "$daemon" --output ios_extracted/daemons/ 2>/dev/null || true
+            ipsw dyld extract "$DYLD" --extract "$daemon" --output ios_extracted/daemons/ 2>/dev/null || echo "  跳过"
           done
           
-          ls -la ios_extracted/daemons/
-        continue-on-error: true
+          echo "提取结果:"
+          ls -la ios_extracted/daemons/ 2>/dev/null || echo "  无文件"
       
       # ========== 提取框架 ==========
       - name: Extract frameworks
@@ -147,19 +162,44 @@ jobs:
             exit 0
           fi
           
-          ipsw dyld extract "$DYLD" --extract "AppleMobileFileIntegrity" --output ios_extracted/frameworks/ 2>/dev/null || true
-          ipsw dyld extract "$DYLD" --extract "Security" --output ios_extracted/frameworks/ 2>/dev/null || true
+          # 尝试提取 AMFI
+          for name in AppleMobileFileIntegrity AMFI; do
+            ipsw dyld extract "$DYLD" --extract "$name" --output ios_extracted/frameworks/ 2>/dev/null || true
+          done
           
-          ls -la ios_extracted/frameworks/
-        continue-on-error: true
+          # 尝试提取 Security
+          for name in Security libsecurity; do
+            ipsw dyld extract "$DYLD" --extract "$name" --output ios_extracted/frameworks/ 2>/dev/null || true
+          done
+          
+          ls -la ios_extracted/frameworks/ 2>/dev/null
       
-      # ========== 打包并上传 ==========
+      # ========== 如果都失败，使用 strings 直接分析 dyld 缓存 ==========
+      - name: Fallback - extract strings from dyld cache
+        run: |
+          DYLD=$(find ios_extracted -name "dyld_shared_cache*" -type f | head -1)
+          
+          if [ -n "$DYLD" ]; then
+            echo "从 dyld 缓存提取字符串..."
+            
+            # 提取关键字符串
+            strings "$DYLD" | grep -E "(amfid|installd|sandboxd|trustd|AMFI|Security|com.apple.amfi|com.apple.sandbox)" | head -200 > ios_extracted/key_strings.txt
+            
+            echo "字符串提取完成"
+            wc -l ios_extracted/key_strings.txt
+          fi
+      
+      # ========== 打包 ==========
       - name: Package results
         run: |
-          if [ -d "ios_extracted" ]; then
-            tar -czf ios_extracted_${DEVICE}_${VERSION}.tar.gz ios_extracted/ || echo "打包失败"
+          if [ -d "ios_extracted" ] && [ "$(ls -A ios_extracted 2>/dev/null)" ]; then
+            tar -czf ios_extracted_${DEVICE}_${VERSION}.tar.gz ios_extracted/
             echo "✅ 打包完成"
             ls -lh ios_extracted_*.tar.gz
+          else
+            echo "创建占位文件"
+            echo "提取失败或没有文件" > ios_extracted_${DEVICE}_${VERSION}.txt
+            tar -czf ios_extracted_${DEVICE}_${VERSION}.tar.gz ios_extracted_*.txt
           fi
       
       - name: Upload artifacts
@@ -168,4 +208,3 @@ jobs:
           name: ios_extracted_${{ env.DEVICE }}_${{ env.VERSION }}
           path: ios_extracted_*.tar.gz
           retention-days: 7
-          if-no-files-found: warn
