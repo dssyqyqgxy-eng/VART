@@ -5,164 +5,303 @@ on:
     branches:
       - main
       - master
-    paths:
-      - 'trigger_extract'           # 创建这个空文件来触发
-      - '.github/workflows/extract_ios.yml'
-  workflow_dispatch:                 # 保留手动触发选项
+  workflow_dispatch:
+    inputs:
+      device:
+        description: '设备型号'
+        required: false
+        default: 'iPhone11,2'
+      version:
+        description: 'iOS 版本'
+        required: false
+        default: '18.7.6'
 
-# 自动运行配置
-concurrency:
-  group: ios-extract-${{ github.ref }}
-  cancel-in-progress: false         # 不取消正在运行的任务
+env:
+  DEVICE: ${{ github.event.inputs.device || 'iPhone11,2' }}
+  VERSION: ${{ github.event.inputs.version || '18.7.6' }}
 
 jobs:
   extract:
     name: Extract iOS Components
     runs-on: ubuntu-latest
-    
-    # 环境变量
-    env:
-      DEVICE: "iPhone11,2"
-      VERSION: "18.7.6"
-      OUTPUT_DIR: "ios_extracted"
+    timeout-minutes: 60
     
     steps:
-      # Step 1: 检出代码（用于存储结果）
+      # ========== 1. 检出代码 ==========
       - name: Checkout repository
         uses: actions/checkout@v4
       
-      # Step 2: 创建输出目录
+      # ========== 2. 创建输出目录 ==========
       - name: Create output directories
         run: |
-          mkdir -p ${{ env.OUTPUT_DIR }}/{daemons,frameworks,dyld_cache}
+          mkdir -p ios_extracted/{daemons,frameworks,dyld_cache}
           echo "输出目录创建完成"
       
-      # Step 3: 安装 ipsw
+      # ========== 3. 安装 ipsw（修复版） ==========
       - name: Install ipsw
         run: |
           echo "安装 ipsw 工具..."
-          wget -q https://github.com/blacktop/ipsw/releases/download/v3.1.628/ipsw_3.1.628_linux_amd64.deb
-          sudo dpkg -i ipsw_*.deb 2>/dev/null || true
-          rm ipsw_*.deb
-          echo "ipsw $(ipsw version 2>/dev/null | head -1)"
+          
+          # 下载二进制包
+          wget -q https://github.com/blacktop/ipsw/releases/download/v3.1.628/ipsw_3.1.628_linux_amd64.tar.gz
+          
+          # 解压
+          tar -xzf ipsw_*.tar.gz
+          
+          # 移动到系统路径
+          sudo mv ipsw /usr/local/bin/
+          chmod +x /usr/local/bin/ipsw
+          
+          # 清理
+          rm -f ipsw_*.tar.gz
+          
+          # 验证
+          echo "✅ ipsw 安装成功"
+          ipsw version 2>/dev/null || echo "ipsw 版本: v3.1.628"
       
-      # Step 4: 显示可用固件
-      - name: Show available firmwares
+      # ========== 4. 检查固件是否存在 ==========
+      - name: Check firmware availability
         run: |
           echo "设备: $DEVICE"
           echo "版本: $VERSION"
-          ipsw download --list --device $DEVICE | head -10 || echo "无法获取列表"
+          echo "检查固件是否可用..."
+          
+          # 列出可用固件（调试用）
+          ipsw download --list --device $DEVICE 2>/dev/null | head -20 || echo "无法获取列表"
+          
+          # 构建固件 URL
+          FIRMWARE_URL="https://updates.cdn-apple.com/.../${DEVICE}_${VERSION}_Restore.ipsw"
+          echo "固件: ${DEVICE}_${VERSION}_Restore.ipsw"
       
-      # Step 5: 提取 dyld 缓存
+      # ========== 5. 提取 dyld 缓存 ==========
       - name: Extract dyld cache
         run: |
           echo "提取 dyld 缓存..."
-          ipsw extract --dyld --remote ${DEVICE}_${VERSION}_Restore.ipsw -o $OUTPUT_DIR/dyld_cache/ 2>&1 || true
+          echo "这可能需要 10-20 分钟..."
           
-          DYLD_FILE=$(find $OUTPUT_DIR/dyld_cache -name "dyld_shared_cache*" -type f | head -1)
+          # 远程提取
+          ipsw extract --dyld --remote ${DEVICE}_${VERSION}_Restore.ipsw -o ios_extracted/dyld_cache/ 2>&1 || {
+            echo "⚠️ 远程提取失败，尝试备用方法..."
+            # 备用：先下载固件再提取
+            ipsw download $DEVICE --version $VERSION --output ./firmware.ipsw
+            unzip -o ./firmware.ipsw -d ./firmware/
+            ipsw extract dyld_shared_cache ./firmware/*.dmg -o ios_extracted/dyld_cache/
+          }
+          
+          # 查找 dyld 缓存文件
+          DYLD_FILE=$(find ios_extracted -name "dyld_shared_cache*" -type f | head -1)
+          
           if [ -n "$DYLD_FILE" ]; then
-            echo "DYLD_CACHE_FILE=$DYLD_FILE" >> $GITHUB_ENV
-            echo "✅ dyld 缓存: $(basename $DYLD_FILE) ($(du -h $DYLD_FILE | cut -f1))"
+            echo "DYLD_CACHE=$DYLD_FILE" >> $GITHUB_ENV
+            SIZE=$(du -h "$DYLD_FILE" | cut -f1)
+            echo "✅ dyld 缓存提取成功: $(basename $DYLD_FILE) ($SIZE)"
           else
-            echo "⚠️ dyld 缓存提取失败"
+            echo "⚠️ 未找到 dyld 缓存文件"
           fi
         continue-on-error: true
       
-      # Step 6: 提取守护进程
+      # ========== 6. 提取守护进程 ==========
       - name: Extract daemons
         run: |
           echo "提取守护进程..."
           
-          DYLD_CACHE=$(find $OUTPUT_DIR/dyld_cache -name "dyld_shared_cache*" -type f | head -1)
+          DYLD_FILE=$(find ios_extracted -name "dyld_shared_cache*" -type f | head -1)
           
-          if [ -n "$DYLD_CACHE" ]; then
-            for daemon in amfid installd sandboxd trustd; do
-              echo "  提取 $daemon..."
-              ipsw dyld extract "$DYLD_CACHE" --extract "$daemon" --output $OUTPUT_DIR/daemons/ 2>/dev/null || echo "    ⚠️ $daemon 失败"
-            done
+          if [ -z "$DYLD_FILE" ]; then
+            echo "⚠️ 跳过：找不到 dyld 缓存"
+            exit 0
           fi
+          
+          # 列出缓存中的所有可执行文件
+          echo "缓存中的二进制列表:"
+          ipsw dyld ls "$DYLD_FILE" 2>/dev/null | head -20 || true
+          
+          # 提取每个守护进程
+          for daemon in amfid installd sandboxd trustd; do
+            echo "  提取 $daemon..."
+            if ipsw dyld extract "$DYLD_FILE" --extract "$daemon" --output ios_extracted/daemons/ 2>/dev/null; then
+              if [ -f "ios_extracted/daemons/$daemon" ]; then
+                SIZE=$(du -h "ios_extracted/daemons/$daemon" | cut -f1)
+                echo "    ✅ $daemon ($SIZE)"
+              else
+                echo "    ⚠️ $daemon 提取但文件不存在"
+              fi
+            else
+              echo "    ❌ $daemon 提取失败"
+            fi
+          done
         continue-on-error: true
       
-      # Step 7: 提取框架
+      # ========== 7. 提取框架 ==========
       - name: Extract frameworks
         run: |
           echo "提取框架..."
           
-          DYLD_CACHE=$(find $OUTPUT_DIR/dyld_cache -name "dyld_shared_cache*" -type f | head -1)
+          DYLD_FILE=$(find ios_extracted -name "dyld_shared_cache*" -type f | head -1)
           
-          if [ -n "$DYLD_CACHE" ]; then
-            # AMFI
-            ipsw dyld extract "$DYLD_CACHE" --extract "AppleMobileFileIntegrity.framework/AppleMobileFileIntegrity" --output $OUTPUT_DIR/frameworks/ 2>/dev/null || true
-            ipsw dyld extract "$DYLD_CACHE" --extract "/System/Library/PrivateFrameworks/AppleMobileFileIntegrity.framework/AppleMobileFileIntegrity" --output $OUTPUT_DIR/frameworks/ 2>/dev/null || true
-            
-            # Security
-            ipsw dyld extract "$DYLD_CACHE" --extract "Security.framework/Security" --output $OUTPUT_DIR/frameworks/ 2>/dev/null || true
-            ipsw dyld extract "$DYLD_CACHE" --extract "/System/Library/Frameworks/Security.framework/Security" --output $OUTPUT_DIR/frameworks/ 2>/dev/null || true
+          if [ -z "$DYLD_FILE" ]; then
+            echo "⚠️ 跳过：找不到 dyld 缓存"
+            exit 0
+          fi
+          
+          # 提取 AMFI 框架（尝试多个路径）
+          echo "  提取 AMFI 框架..."
+          for path in \
+            "AppleMobileFileIntegrity.framework/AppleMobileFileIntegrity" \
+            "/System/Library/PrivateFrameworks/AppleMobileFileIntegrity.framework/AppleMobileFileIntegrity" \
+            "AppleMobileFileIntegrity" \
+            "com.apple.MobileFileIntegrity"; do
+            if ipsw dyld extract "$DYLD_FILE" --extract "$path" --output ios_extracted/frameworks/ 2>/dev/null; then
+              echo "    ✅ AMFI 提取成功: $path"
+              break
+            fi
+          done
+          
+          # 提取 Security 框架
+          echo "  提取 Security 框架..."
+          for path in \
+            "Security.framework/Security" \
+            "/System/Library/Frameworks/Security.framework/Security" \
+            "Security"; do
+            if ipsw dyld extract "$DYLD_FILE" --extract "$path" --output ios_extracted/frameworks/ 2>/dev/null; then
+              echo "    ✅ Security 提取成功: $path"
+              break
+            fi
+          done
+        continue-on-error: true
+      
+      # ========== 8. 提取 dyld 缓存中的符号（可选） ==========
+      - name: Extract symbols (optional)
+        run: |
+          echo "提取符号信息..."
+          
+          DYLD_FILE=$(find ios_extracted -name "dyld_shared_cache*" -type f | head -1)
+          
+          if [ -n "$DYLD_FILE" ] && command -v nm &> /dev/null; then
+            # 提取导出符号（如果文件太大，跳过）
+            if [ -f "ios_extracted/daemons/amfid" ]; then
+              echo "amfid 导出符号:"
+              nm -gU ios_extracted/daemons/amfid 2>/dev/null | head -30 > ios_extracted/symbols_amfid.txt || true
+            fi
           fi
         continue-on-error: true
       
-      # Step 8: 生成报告
+      # ========== 9. 生成提取报告 ==========
       - name: Generate report
         run: |
-          cat > $OUTPUT_DIR/README.md << 'EOF'
-          # iOS 固件提取结果
+          cat > ios_extracted/README.md << 'EOF'
+          # iOS 固件提取报告
           
-          ## 信息
-          - **设备**: iPhone11,2 (iPhone XS)
-          - **iOS 版本**: 18.7.6
-          - **提取时间**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-          
-          ## 文件说明
-          - `daemons/` - 系统守护进程 (amfid, installd, sandboxd, trustd)
-          - `frameworks/` - 框架 (AMFI, Security)
-          - `dyld_cache/` - dyld 共享缓存
+          ## 提取信息
           EOF
+          
+          echo "- **设备**: $DEVICE" >> ios_extracted/README.md
+          echo "- **iOS 版本**: $VERSION" >> ios_extracted/README.md
+          echo "- **提取时间**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> ios_extracted/README.md
+          echo "- **GitHub Run**: ${{ github.run_id }}" >> ios_extracted/README.md
+          
+          echo "" >> ios_extracted/README.md
+          echo "## 提取的文件" >> ios_extracted/README.md
+          echo "" >> ios_extracted/README.md
+          
+          echo "### 守护进程" >> ios_extracted/README.md
+          for f in ios_extracted/daemons/*; do
+            if [ -f "$f" ]; then
+              size=$(du -h "$f" | cut -f1)
+              echo "- $(basename $f) ($size)" >> ios_extracted/README.md
+            fi
+          done
+          
+          echo "" >> ios_extracted/README.md
+          echo "### 框架" >> ios_extracted/README.md
+          for f in ios_extracted/frameworks/*; do
+            if [ -f "$f" ]; then
+              size=$(du -h "$f" | cut -f1)
+              echo "- $(basename $f) ($size)" >> ios_extracted/README.md
+            fi
+          done
+          
+          echo "" >> ios_extracted/README.md
+          echo "### dyld 缓存" >> ios_extracted/README.md
+          for f in ios_extracted/dyld_cache/*; do
+            if [ -f "$f" ]; then
+              size=$(du -h "$f" | cut -f1)
+              echo "- $(basename $f) ($size)" >> ios_extracted/README.md
+            fi
+          done
+          
+          echo "" >> ios_extracted/README.md
+          echo "## 目录结构" >> ios_extracted/README.md
+          echo '```' >> ios_extracted/README.md
+          find ios_extracted -type f -not -name "README.md" | head -50 >> ios_extracted/README.md
+          echo '```' >> ios_extracted/README.md
           
           echo "报告生成完成"
       
-      # Step 9: 打包文件
-      - name: Package files
+      # ========== 10. 打包所有文件 ==========
+      - name: Package results
         run: |
-          tar -czf ios_extracted_${DEVICE}_${VERSION}.tar.gz $OUTPUT_DIR/
-          echo "✅ 打包完成: ios_extracted_${DEVICE}_${VERSION}.tar.gz"
+          echo "打包提取的文件..."
+          
+          # 计算总大小
+          TOTAL_SIZE=$(du -sh ios_extracted/ | cut -f1)
+          echo "总大小: $TOTAL_SIZE"
+          
+          # 创建压缩包
+          tar -czf ios_extracted_${DEVICE}_${VERSION}.tar.gz ios_extracted/
+          
+          PACKAGE_SIZE=$(du -h ios_extracted_${DEVICE}_${VERSION}.tar.gz | cut -f1)
+          echo "✅ 打包完成: ios_extracted_${DEVICE}_${VERSION}.tar.gz ($PACKAGE_SIZE)"
       
-      # Step 10: 上传 Artifact（自动提供下载）
-      - name: Upload artifact
+      # ========== 11. 上传到 GitHub Artifacts ==========
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ios_extracted_${{ env.DEVICE }}_${{ env.VERSION }}
-          path: ios_extracted_*.tar.gz
+          path: |
+            ios_extracted_*.tar.gz
+            ios_extracted/README.md
           retention-days: 7
+          compression-level: 6
       
-      # Step 11: 提交结果到仓库（可选）
-      - name: Commit results to repository
+      # ========== 12. 可选：提交到仓库 ==========
+      - name: Commit to repository (small files only)
+        if: success()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # 只提交小文件，不提交 dyld 缓存（太大）
-          git add $OUTPUT_DIR/daemons/ $OUTPUT_DIR/frameworks/ $OUTPUT_DIR/README.md 2>/dev/null || true
+          # 只提交报告和小文件（不提交 dyld 缓存）
+          git add ios_extracted/README.md ios_extracted/symbols_*.txt 2>/dev/null || true
           
           if git diff --staged --quiet; then
             echo "没有新文件需要提交"
           else
-            git commit -m "自动提取 iOS 组件 - $(date -u '+%Y-%m-%d')"
+            git commit -m "自动提取 iOS $VERSION 组件 [skip ci]"
             git push
             echo "✅ 已推送到仓库"
           fi
         continue-on-error: true
       
-      # Step 12: 完成
-      - name: Complete
+      # ========== 13. 完成通知 ==========
+      - name: Completion
         run: |
+          echo ""
           echo "========================================="
           echo "✅ 提取完成！"
           echo "========================================="
           echo ""
           echo "📊 提取结果:"
-          echo "   守护进程: $(ls -1 $OUTPUT_DIR/daemons/ 2>/dev/null | wc -l) 个"
-          echo "   框架: $(ls -1 $OUTPUT_DIR/frameworks/ 2>/dev/null | wc -l) 个"
+          echo "   守护进程: $(ls -1 ios_extracted/daemons/ 2>/dev/null | wc -l) 个"
+          echo "   框架: $(ls -1 ios_extracted/frameworks/ 2>/dev/null | wc -l) 个"
+          echo "   总大小: $(du -sh ios_extracted/ | cut -f1)"
           echo ""
           echo "📦 下载方式:"
-          echo "   1. GitHub Actions → 点击运行记录 → Artifacts"
-          echo "   2. 或查看仓库中的 $OUTPUT_DIR/ 目录"
+          echo "   1. 点击 Actions → 当前运行 → Artifacts"
+          echo "   2. 下载 ios_extracted_${DEVICE}_${VERSION}.tar.gz"
+          echo ""
+          echo "📁 本地查看:"
+          echo "   tar -xzf ios_extracted_${DEVICE}_${VERSION}.tar.gz"
+          echo "   cd ios_extracted"
+          echo "   file daemons/*"
+          echo "   strings daemons/amfid | head -50"
