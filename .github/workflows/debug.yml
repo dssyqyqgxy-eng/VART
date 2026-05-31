@@ -1,0 +1,84 @@
+- name: Debug - mount all DMGs and search
+  run: |
+    echo "开始调试：挂载所有 DMG 并搜索"
+    
+    # 列出所有 DMG
+    echo "所有 DMG 文件:"
+    find firmware -name "*.dmg" -type f -exec ls -lh {} \;
+    
+    # 保存 DMG 列表
+    find firmware -name "*.dmg" -type f > /tmp/all_dmgs.txt
+    
+    # 遍历每个 DMG
+    while read DMG; do
+      echo ""
+      echo "处理: $(basename "$DMG")"
+      
+      # 创建挂载点
+      MOUNT_NAME=$(basename "$DMG" | sed 's/\.dmg//' | sed 's/[^a-zA-Z0-9]/_/g')
+      MOUNT_POINT="/Volumes/$MOUNT_NAME"
+      
+      # 尝试挂载（使用 sudo 解决权限问题）
+      echo "尝试挂载到: $MOUNT_POINT"
+      sudo hdiutil attach "$DMG" -mountpoint "$MOUNT_POINT" -nobrowse -readonly || {
+        echo "挂载失败，跳过"
+        continue
+      }
+      
+      # 使用 sudo 搜索（解决权限问题）
+      echo "搜索守护进程:"
+      for daemon in amfid installd sandboxd trustd; do
+        FOUND=$(sudo find "$MOUNT_POINT" -name "$daemon" -type f 2>/dev/null | head -1)
+        if [ -n "$FOUND" ]; then
+          echo "找到 $daemon: $FOUND"
+          sudo cp "$FOUND" ios_extracted/daemons/ 2>/dev/null || true
+        else
+          echo "未找到 $daemon"
+        fi
+      done
+      
+      # 搜索 dyld 缓存
+      echo "搜索 dyld 缓存:"
+      DYLD=$(sudo find "$MOUNT_POINT" -name "dyld_shared_cache*" -type f 2>/dev/null | head -1)
+      if [ -n "$DYLD" ]; then
+        echo "找到 dyld: $DYLD"
+        sudo cp "$DYLD" ios_extracted/dyld_cache/ 2>/dev/null || true
+      else
+        echo "未找到 dyld 缓存"
+      fi
+      
+      # 搜索框架
+      echo "搜索框架:"
+      AMFI=$(sudo find "$MOUNT_POINT" -type d -name "AppleMobileFileIntegrity.framework" 2>/dev/null | head -1)
+      if [ -n "$AMFI" ]; then
+        echo "找到 AMFI: $AMFI"
+        sudo cp -R "$AMFI" ios_extracted/frameworks/ 2>/dev/null || true
+      else
+        echo "未找到 AMFI"
+      fi
+      
+      SECURITY=$(sudo find "$MOUNT_POINT" -type d -name "Security.framework" 2>/dev/null | head -1)
+      if [ -n "$SECURITY" ]; then
+        echo "找到 Security: $SECURITY"
+        sudo cp -R "$SECURITY" ios_extracted/frameworks/ 2>/dev/null || true
+      else
+        echo "未找到 Security"
+      fi
+      
+      # 卸载
+      sudo hdiutil detach "$MOUNT_POINT" -force 2>/dev/null || true
+      
+    done < /tmp/all_dmgs.txt
+    
+    # 修复权限（将 root 拥有的文件改为 runner）
+    echo "修复文件权限..."
+    sudo chown -R $(whoami) ios_extracted/
+    
+    echo ""
+    echo "调试完成"
+    echo "守护进程:"
+    ls -la ios_extracted/daemons/ 2>/dev/null || echo "无"
+    echo "框架:"
+    ls -la ios_extracted/frameworks/ 2>/dev/null || echo "无"
+    echo "dyld:"
+    ls -la ios_extracted/dyld_cache/ 2>/dev/null || echo "无"
