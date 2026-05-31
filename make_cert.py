@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apple 高仿证书生成器 - 最终修正版"""
+"""Apple 高仿证书生成器 - 最终版（含内核扩展 OID）"""
 import datetime, os, sys, base64, zipfile, uuid
 from cryptography import x509
 from cryptography.x509.oid import ObjectIdentifier, NameOID, ExtendedKeyUsageOID
@@ -21,19 +21,23 @@ OID_ROOT_GENERIC  = ObjectIdentifier("1.2.840.113635.100.1.2")
 OID_ROOT_CODESIGN = ObjectIdentifier("1.2.840.113635.100.1.108")
 OID_ROOT_PRIVATE  = ObjectIdentifier("1.2.840.113635.100.1.115")
 
-# 叶子证书策略（全部放入 CertificatePolicies）
+# 叶子证书策略
 OID_POLICY_5_1      = ObjectIdentifier("1.2.840.113635.100.5.1")
-OID_ROOT_PRIVATE    = ObjectIdentifier("1.2.840.113635.100.1.115")
 OID_APPLE_ISSUED_1  = ObjectIdentifier("1.2.840.113635.100.6.86")
 OID_APPLE_ISSUED_2  = ObjectIdentifier("1.2.840.113635.100.6.87")
 OID_PROD_MARK       = ObjectIdentifier("1.2.840.113635.100.6.27.11.1")
 OID_LEAF_MARK       = ObjectIdentifier("1.2.840.113635.100.6.27.18")
 
-# 代码签名平台
-OID_1_x = [ObjectIdentifier(f"1.2.840.113635.100.6.1.{i}") for i in range(1, 11)]
+# 代码签名全平台 + 内核扩展
+OID_1_x = [ObjectIdentifier(f"1.2.840.113635.100.6.1.{i}") for i in 
+           [1,2,3,4,5,6,7,8,9,10,14,21,22,25]]
 
 # IPA 签名核心
 OID_IPA_SIGNING = ObjectIdentifier("1.2.840.113635.100.6.1.13")
+
+# PassKit + 描述文件（来自 Apple Distribution 证书）
+OID_PASSKIT       = ObjectIdentifier("1.2.840.113635.100.6.1.7")
+OID_PROVISIONING  = ObjectIdentifier("1.2.840.113635.100.6.1.4")
 
 # WWDR / 系统安全
 OID_WWDR     = ObjectIdentifier("1.2.840.113635.100.6.2.1")
@@ -83,7 +87,7 @@ def build_cert(subject, issuer, issuer_key, subject_key, is_ca=False):
                           crl_sign=False, encipher_only=False,
                           decipher_only=False), critical=True)
         builder = builder.add_extension(
-            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CODE_SIGNING]), critical=False)
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CODE_SIGNING]), critical=True)
         builder = builder.add_extension(
             x509.CertificatePolicies([
                 x509.PolicyInformation(OID_POLICY_5_1, policy_qualifiers=[
@@ -116,6 +120,12 @@ def build_cert(subject, issuer, issuer_key, subject_key, is_ca=False):
         for oid in OID_1_x:
             builder = builder.add_extension(
                 x509.UnrecognizedExtension(oid, b'\x05\x00'), critical=False)
+        # Apple Distribution 证书中 confirmed 的 OID (critical)
+        builder = builder.add_extension(
+            x509.UnrecognizedExtension(OID_PASSKIT, b'\x05\x00'), critical=True)
+        builder = builder.add_extension(
+            x509.UnrecognizedExtension(OID_PROVISIONING, b'\x05\x00'), critical=True)
+        # 其余 OID
         builder = builder.add_extension(
             x509.UnrecognizedExtension(OID_IPA_SIGNING, TEAM_ID.encode()), critical=False)
         builder = builder.add_extension(
@@ -156,8 +166,8 @@ codeca_key = gen_key()
 codeca_subj = x509.Name([
     x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
     x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Apple Inc."),
-    x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Apple Certification Authority"),
-    x509.NameAttribute(NameOID.COMMON_NAME, "Apple iPhone Certification Authority"),
+    x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "G3"),
+    x509.NameAttribute(NameOID.COMMON_NAME, "Apple Worldwide Developer Relations Certification Authority"),
 ])
 codeca_cert = build_cert(codeca_subj, root_subj, root_key, codeca_key, is_ca=True)
 write_key(f"{OUTPUT_DIR}/codeca_key.key", codeca_key)
@@ -212,7 +222,7 @@ with open(f"{OUTPUT_DIR}/certificate_chain.txt", "w") as f:
     f.write("Apple 高仿证书 — 完整证书链\n\n")
     f.write(cert_text(root_cert, "Apple Root CA"))
     f.write("\n\n")
-    f.write(cert_text(codeca_cert, "Apple iPhone Certification Authority"))
+    f.write(cert_text(codeca_cert, "Apple Worldwide Developer Relations Certification Authority"))
     f.write("\n\n")
     f.write(cert_text(dev_cert, "Apple Development"))
 print("✅ certificate_chain.txt")
