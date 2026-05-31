@@ -1,6 +1,10 @@
-name: Decrypt and Extract iOS Firmware
+name: Decrypt, Mount All DMGs and Extract
 
 on:
+  push:
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
 jobs:
@@ -20,7 +24,6 @@ jobs:
           mkdir -p extracted/daemons
           mkdir -p extracted/frameworks
           mkdir -p extracted/kexts
-          mkdir -p extracted/strings
 
       - name: Download firmware
         run: |
@@ -38,27 +41,20 @@ jobs:
             img4 -i "$DMG" -o "decrypted_$(basename "$DMG")" 2>/dev/null || true
           done
 
-      - name: Mount original DMGs
-        run: |
-          INDEX=1
-          for DMG in firmware/*.dmg; do
-            sudo hdiutil attach "$DMG" -mountpoint "/Volumes/orig_$INDEX" -nobrowse -readonly 2>/dev/null || true
-            INDEX=$((INDEX + 1))
-          done
-
-      - name: Mount decrypted DMGs
+      - name: Mount ALL decrypted DMGs
         run: |
           INDEX=1
           for DMG in decrypted_*.dmg; do
             if [ -f "$DMG" ]; then
-              sudo hdiutil attach "$DMG" -mountpoint "/Volumes/dec_$INDEX" -nobrowse -readonly 2>/dev/null || true
+              echo "挂载解密后: $(basename "$DMG")"
+              sudo hdiutil attach "$DMG" -mountpoint "/Volumes/dmg_$INDEX" -nobrowse -readonly 2>/dev/null || true
             fi
             INDEX=$((INDEX + 1))
           done
 
-      - name: Search ALL mounted volumes
+      - name: Search all mounted DMGs
         run: |
-          for VOL in /Volumes/*; do
+          for VOL in /Volumes/dmg_*; do
             if [ -d "$VOL" ]; then
               echo "搜索: $VOL"
               sudo find "$VOL" -name "amfid" -type f -exec cp {} extracted/daemons/ \; 2>/dev/null || true
@@ -72,37 +68,11 @@ jobs:
             fi
           done
 
-      - name: Search firmware directory
-        run: |
-          find firmware -name "amfid" -type f -exec cp {} extracted/daemons/ \; 2>/dev/null || true
-          find firmware -name "installd" -type f -exec cp {} extracted/daemons/ \; 2>/dev/null || true
-          find firmware -name "sandboxd" -type f -exec cp {} extracted/daemons/ \; 2>/dev/null || true
-          find firmware -name "trustd" -type f -exec cp {} extracted/daemons/ \; 2>/dev/null || true
-          find firmware -type d -name "AppleMobileFileIntegrity.framework" -exec cp -R {} extracted/frameworks/ \; 2>/dev/null || true
-          find firmware -type d -name "Security.framework" -exec cp -R {} extracted/frameworks/ \; 2>/dev/null || true
-
-      - name: Search entire root filesystem
-        run: |
-          sudo find / -name "amfid" -type f -exec cp {} extracted/daemons/ \; 2>/dev/null || true
-          sudo find / -name "installd" -type f -exec cp {} extracted/daemons/ \; 2>/dev/null || true
-          sudo find / -name "sandboxd" -type f -exec cp {} extracted/daemons/ \; 2>/dev/null || true
-          sudo find / -name "trustd" -type f -exec cp {} extracted/daemons/ \; 2>/dev/null || true
-
       - name: Unmount all
         run: |
-          for VOL in /Volumes/orig_* /Volumes/dec_*; do
+          for VOL in /Volumes/dmg_*; do
             sudo hdiutil detach "$VOL" -force 2>/dev/null || true
           done
-
-      - name: Extract strings
-        run: |
-          for daemon in extracted/daemons/*; do
-            if [ -f "$daemon" ]; then
-              name=$(basename "$daemon")
-              strings "$daemon" > "extracted/strings/${name}.txt"
-            fi
-          done
-          strings firmware.ipsw > extracted/strings/ipsw.txt
 
       - name: Upload
         uses: actions/upload-artifact@v4
