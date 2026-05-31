@@ -1,0 +1,94 @@
+name: 提取 macOS 系统二进制并分析
+
+on:
+  push:                    # 推送代码到仓库时自动跑
+    paths:
+      - '.github/workflows/extract-binaries.yml'  # 工作流文件本身被推送时触发
+  workflow_dispatch:        # 手动触发
+
+jobs:
+  extract-and-analyze:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - binary: amfid
+            path: /usr/libexec/amfid
+          - binary: trustd
+            path: /usr/libexec/trustd
+          - binary: sandboxd
+            path: /usr/libexec/sandboxd
+          - binary: installd
+            path: /usr/libexec/installd
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装分析工具
+        run: brew install jtool2 radare2
+
+      - name: 创建目录
+        run: |
+          mkdir -p binaries
+          mkdir -p analysis_results/${{ matrix.binary }}
+
+      # ====== 提取二进制文件 ======
+      - name: 提取目标二进制
+        run: cp ${{ matrix.path }} binaries/${{ matrix.binary }}
+
+      # ====== 基本信息 ======
+      - name: 计算文件哈希和系统信息
+        run: |
+          echo "文件: ${{ matrix.binary }}" > analysis_results/${{ matrix.binary }}/00_info.txt
+          echo "路径: ${{ matrix.path }}" >> analysis_results/${{ matrix.binary }}/00_info.txt
+          echo "系统版本:" >> analysis_results/${{ matrix.binary }}/00_info.txt
+          sw_vers >> analysis_results/${{ matrix.binary }}/00_info.txt
+          echo "" >> analysis_results/${{ matrix.binary }}/00_info.txt
+          echo "SHA256:" >> analysis_results/${{ matrix.binary }}/00_info.txt
+          shasum -a 256 binaries/${{ matrix.binary }} >> analysis_results/${{ matrix.binary }}/00_info.txt
+
+      # ====== 字符串分析 ======
+      - name: [strings] XPC 相关
+        run: strings binaries/${{ matrix.binary }} | grep -i 'xpc\|com\.apple\|machservice' > analysis_results/${{ matrix.binary }}/01_xpc_strings.txt || echo "无匹配" > analysis_results/${{ matrix.binary }}/01_xpc_strings.txt
+
+      - name: [strings] 安全相关
+        run: strings binaries/${{ matrix.binary }} | grep -iE 'valid|sign|entitle|sandbox|trust|policy|verify|permit' > analysis_results/${{ matrix.binary }}/02_security_strings.txt || echo "无匹配" > analysis_results/${{ matrix.binary }}/02_security_strings.txt
+
+      - name: [strings] 错误/日志相关
+        run: strings binaries/${{ matrix.binary }} | grep -iE 'error|fail|reject|deny|debug|log|assert' > analysis_results/${{ matrix.binary }}/03_error_strings.txt || echo "无匹配" > analysis_results/${{ matrix.binary }}/03_error_strings.txt
+
+      - name: [strings] 全部字符串
+        run: strings binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/04_all_strings.txt
+
+      # ====== jtool2 分析 ======
+      - name: [jtool2] 文件头与签名信息
+        run: jtool2 --macho binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/05_macho_header.txt
+
+      - name: [jtool2] 导出符号表
+        run: jtool2 --analyze binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/06_symbols.txt
+
+      - name: [jtool2] 搜索 MIS 相关符号
+        run: jtool2 --grep MIS binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/07_MIS_symbols.txt || echo "无匹配" > analysis_results/${{ matrix.binary }}/07_MIS_symbols.txt
+
+      # ====== radare2 分析 ======
+      - name: [r2] 函数列表
+        run: r2 -q -c 'aaa; afl' binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/08_r2_functions.txt
+
+      - name: [r2] 字符串列表
+        run: r2 -q -c 'aaa; iz' binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/09_r2_strings.txt
+
+      - name: [r2] 导出表
+        run: r2 -q -c 'aaa; iE' binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/10_r2_exports.txt
+
+      - name: [r2] 导入表
+        run: r2 -q -c 'aaa; ii' binaries/${{ matrix.binary }} > analysis_results/${{ matrix.binary }}/11_r2_imports.txt
+
+      # ====== 打包上传 ======
+      - name: 上传二进制和分析结果
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-package-${{ matrix.binary }}
+          path: |
+            binaries/${{ matrix.binary }}
+            analysis_results/${{ matrix.binary }}/
