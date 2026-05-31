@@ -17,7 +17,7 @@ jobs:
         run: |
           brew tap blacktop/tap
           brew install ipsw
-          pip3 install pyimg4
+          pip3 install pyimg4 --break-system-packages 2>/dev/null || pip3 install pyimg4 --user
 
       - name: Create output directories
         run: |
@@ -43,6 +43,7 @@ jobs:
           KEY=$(cat keys.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('key', ''))")
           echo "IV=$IV" >> $GITHUB_ENV
           echo "KEY=$KEY" >> $GITHUB_ENV
+          echo "IV=$IV, KEY=$KEY"
 
       - name: Decrypt and mount
         run: |
@@ -58,12 +59,15 @@ jobs:
           else
             sudo hdiutil attach "$SYSTEM_DMG" -mountpoint /Volumes/System -nobrowse
           fi
+          
+          ls -la /Volumes/System/
 
       - name: Extract daemons
         run: |
           for daemon in amfid installd sandboxd trustd; do
             find /Volumes/System -name "$daemon" -type f -exec cp {} extracted/daemons/ \; 2>/dev/null || true
           done
+          echo "守护进程:"
           ls -la extracted/daemons/
 
       - name: Extract frameworks
@@ -71,6 +75,7 @@ jobs:
           for framework in AppleMobileFileIntegrity Security; do
             find /Volumes/System -type d -name "${framework}.framework" -exec cp -R {} extracted/frameworks/ \; 2>/dev/null || true
           done
+          echo "框架:"
           ls -la extracted/frameworks/
 
       - name: Extract kexts
@@ -78,12 +83,17 @@ jobs:
           for kext in sandbox AMFI; do
             find /Volumes/System -type d -name "${kext}.kext" -exec cp -R {} extracted/kexts/ \; 2>/dev/null || true
           done
+          echo "内核扩展:"
+          ls -la extracted/kexts/
 
       - name: Extract strings
         run: |
           for daemon in extracted/daemons/*; do
-            name=$(basename "$daemon")
-            strings "$daemon" | grep -E "com.apple|XPC|entitlement|non.fatal|sdk|version" > "extracted/strings/${name}.txt" 2>/dev/null || true
+            if [ -f "$daemon" ]; then
+              name=$(basename "$daemon")
+              strings "$daemon" | grep -E "com.apple|XPC|entitlement|non.fatal|sdk|version|disabled" > "extracted/strings/${name}.txt" 2>/dev/null || true
+              echo "$name: $(wc -l < extracted/strings/${name}.txt 2>/dev/null) 行"
+            fi
           done
 
       - name: Unmount
