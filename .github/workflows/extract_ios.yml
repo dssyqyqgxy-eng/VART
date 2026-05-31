@@ -1,0 +1,175 @@
+name: Extract iOS Firmware Complete
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: macos-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Create output directories
+        run: |
+          mkdir -p ios_extracted/daemons
+          mkdir -p ios_extracted/frameworks
+          mkdir -p ios_extracted/dyld_cache
+          mkdir -p ios_extracted/symbols
+          echo "目录创建完成"
+
+      - name: Install ipsw
+        run: |
+          brew tap blacktop/tap
+          brew install ipsw
+          ipsw version
+
+      - name: Download firmware
+        run: |
+          curl -L -o firmware.ipsw "https://updates.cdn-apple.com/2026WinterFCS/fullrestores/047-83292/FC308431-84C0-4001-9A24-09FC77486C76/iPhone11,2,iPhone11,4,iPhone11,6_18.7.6_22H320_Restore.ipsw"
+          ls -lh firmware.ipsw
+
+      - name: Extract dyld cache
+        run: |
+          ipsw extract --dyld --dyld-arch arm64e firmware.ipsw -o ios_extracted/dyld_cache/
+          echo "dyld 缓存提取完成"
+          ls -lh ios_extracted/dyld_cache/
+
+      - name: Extract daemons from dyld cache
+        run: |
+          DYLD=$(find ios_extracted/dyld_cache -name "dyld_shared_cache*" -type f | head -1)
+          echo "dyld 缓存: $DYLD"
+          
+          if [ -n "$DYLD" ]; then
+            for daemon in amfid installd sandboxd trustd; do
+              echo "提取 $daemon..."
+              ipsw dyld extract "$DYLD" --extract "$daemon" --output ios_extracted/daemons/ 2>/dev/null || echo "  未找到 $daemon"
+            done
+          else
+            echo "未找到 dyld 缓存"
+            exit 1
+          fi
+          
+          echo ""
+          echo "=== 守护进程列表 ==="
+          ls -la ios_extracted/daemons/ || echo "无"
+
+      - name: Extract frameworks from dyld cache
+        run: |
+          DYLD=$(find ios_extracted/dyld_cache -name "dyld_shared_cache*" -type f | head -1)
+          
+          if [ -n "$DYLD" ]; then
+            echo "提取 AMFI 框架..."
+            ipsw dyld extract "$DYLD" --extract "AppleMobileFileIntegrity" --output ios_extracted/frameworks/ 2>/dev/null || echo "未找到 AMFI"
+            
+            echo "提取 Security 框架..."
+            ipsw dyld extract "$DYLD" --extract "Security" --output ios_extracted/frameworks/ 2>/dev/null || echo "未找到 Security"
+          fi
+          
+          echo ""
+          echo "=== 框架列表 ==="
+          ls -la ios_extracted/frameworks/ || echo "无"
+
+      - name: Extract strings from binaries
+        run: |
+          echo "提取关键字符串..."
+          
+          for daemon in amfid installd sandboxd trustd; do
+            if [ -f "ios_extracted/daemons/$daemon" ]; then
+              strings ios_extracted/daemons/$daemon | grep -E "com.apple|XPC|entitlement|version|error|fail" > ios_extracted/symbols/${daemon}_strings.txt
+              COUNT=$(wc -l < ios_extracted/symbols/${daemon}_strings.txt)
+              echo "$daemon: $COUNT 行"
+            fi
+          done
+          
+          for framework in AppleMobileFileIntegrity Security; do
+            FRAMEWORK_PATH=$(find ios_extracted/frameworks -name "$framework" -type f -perm +111 2>/dev/null | head -1)
+            if [ -n "$FRAMEWORK_PATH" ]; then
+              strings "$FRAMEWORK_PATH" | grep -E "com.apple|XPC|entitlement|version" > ios_extracted/symbols/${framework}_strings.txt
+              COUNT=$(wc -l < ios_extracted/symbols/${framework}_strings.txt)
+              echo "$framework: $COUNT 行"
+            fi
+          done
+
+      - name: Generate report
+        run: |
+          cat > ios_extracted/README.md << 'EOF'
+          # iOS 固件提取报告
+          
+          ## 提取信息
+          EOF
+          
+          echo "- **设备**: iPhone11,2 (iPhone XS)" >> ios_extracted/README.md
+          echo "- **iOS 版本**: 18.7.6 (22H320)" >> ios_extracted/README.md
+          echo "- **提取时间**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> ios_extracted/README.md
+          echo "" >> ios_extracted/README.md
+          echo "## 提取的文件" >> ios_extracted/README.md
+          echo "" >> ios_extracted/README.md
+          
+          echo "### 守护进程" >> ios_extracted/README.md
+          for f in ios_extracted/daemons/*; do
+            if [ -f "$f" ]; then
+              size=$(ls -lh "$f" | awk '{print $5}')
+              name=$(basename "$f")
+              echo "- $name ($size)" >> ios_extracted/README.md
+            fi
+          done
+          
+          echo "" >> ios_extracted/README.md
+          echo "### 框架" >> ios_extracted/README.md
+          for f in ios_extracted/frameworks/*; do
+            if [ -d "$f" ]; then
+              size=$(du -sh "$f" | cut -f1)
+              name=$(basename "$f")
+              echo "- $name ($size)" >> ios_extracted/README.md
+            fi
+          done
+          
+          echo "" >> ios_extracted/README.md
+          echo "### dyld 缓存" >> ios_extracted/README.md
+          for f in ios_extracted/dyld_cache/*; do
+            if [ -f "$f" ]; then
+              size=$(ls -lh "$f" | awk '{print $5}')
+              name=$(basename "$f")
+              echo "- $name ($size)" >> ios_extracted/README.md
+            fi
+          done
+          
+          echo "" >> ios_extracted/README.md
+          echo "## 使用说明" >> ios_extracted/README.md
+          echo '```bash' >> ios_extracted/README.md
+          echo "# 解压查看" >> ios_extracted/README.md
+          echo "tar -xzf ios_extracted_18.7.6.tar.gz" >> ios_extracted/README.md
+          echo "cd ios_extracted" >> ios_extracted/README.md
+          echo "" >> ios_extracted/README.md
+          echo "# 查看守护进程字符串" >> ios_extracted/README.md
+          echo "cat symbols/amfid_strings.txt | head -50" >> ios_extracted/README.md
+          echo '```' >> ios_extracted/README.md
+
+      - name: Package results
+        run: |
+          tar -czf ios_extracted_18.7.6.tar.gz ios_extracted/
+          echo "打包完成"
+          ls -lh ios_extracted_*.tar.gz
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios_extracted_18.7.6
+          path: ios_extracted_18.7.6.tar.gz
+          retention-days: 7
+
+      - name: Completion
+        run: |
+          echo ""
+          echo "========================================="
+          echo "✅ 提取完成！"
+          echo "========================================="
+          echo ""
+          echo "守护进程: $(ls -1 ios_extracted/daemons/ 2>/dev/null | wc -l) 个"
+          echo "框架: $(ls -1 ios_extracted/frameworks/ 2>/dev/null | wc -l) 个"
+          echo ""
+          echo "下载: Actions → Artifacts → ios_extracted_18.7.6.tar.gz"
