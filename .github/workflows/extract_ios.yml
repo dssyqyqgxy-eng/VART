@@ -1,4 +1,4 @@
-name: Extract iOS Firmware (Auto Decrypt)
+name: Extract iOS Firmware
 
 on:
   push:
@@ -25,41 +25,22 @@ jobs:
           brew install ipsw
           ipsw version
 
-      - name: Download firmware with keys
+      - name: Download firmware manually
         run: |
-          # 尝试下载并自动获取密钥
-          ipsw download iPhone11,2 --version 18.7.6 --keys -o firmware.ipsw
+          # 直接 curl 下载
+          curl -L -o firmware.ipsw "https://updates.cdn-apple.com/2026WinterFCS/fullrestores/047-83292/FC308431-84C0-4001-9A24-09FC77486C76/iPhone11,2,iPhone11,4,iPhone11,6_18.7.6_22H320_Restore.ipsw"
           ls -lh firmware.ipsw
 
-      - name: Try to extract dyld cache
+      - name: Try ipsw extract with automatic keys
         run: |
-          # ipsw 会自动使用密钥解密
-          ipsw extract dyld_shared_cache firmware.ipsw -o ios_extracted/dyld_cache/ || {
-            echo "自动提取失败，尝试手动解密"
-            exit 1
-          }
+          # ipsw 会自动获取密钥
+          ipsw extract dyld_shared_cache firmware.ipsw -o ios_extracted/dyld_cache/ || echo "提取失败"
+          ls -la ios_extracted/dyld_cache/
 
-      - name: Extract daemons if dyld cache exists
-        run: |
-          DYLD=$(find ios_extracted/dyld_cache -name "dyld_shared_cache*" -type f | head -1)
-          if [ -n "$DYLD" ]; then
-            for daemon in amfid installd sandboxd trustd; do
-              ipsw dyld extract "$DYLD" --extract "$daemon" --output ios_extracted/daemons/
-            done
-          fi
-
-      - name: Extract frameworks if dyld cache exists
-        run: |
-          DYLD=$(find ios_extracted/dyld_cache -name "dyld_shared_cache*" -type f | head -1)
-          if [ -n "$DYLD" ]; then
-            ipsw dyld extract "$DYLD" --extract "AppleMobileFileIntegrity" --output ios_extracted/frameworks/
-            ipsw dyld extract "$DYLD" --extract "Security" --output ios_extracted/frameworks/
-          fi
-
-      - name: Fallback - Manual decryption
+      - name: If extract failed, try manual decryption
         if: failure()
         run: |
-          echo "=== 手动解密模式 ==="
+          echo "手动解密..."
           
           # 解压 IPSW
           unzip -q firmware.ipsw -d firmware/
@@ -68,44 +49,52 @@ jobs:
           SYSTEM_DMG=$(find firmware -name "*.dmg" | head -1)
           echo "系统 DMG: $SYSTEM_DMG"
           
-          # 尝试从 ipsw.me API 获取密钥
-          curl -s "https://api.ipsw.me/v2.1/firmwares/iPhone11,2/18.7.6/22H320" > keys.json
-          
-          IV=$(cat keys.json | grep -o '"iv":"[^"]*"' | cut -d'"' -f4)
-          KEY=$(cat keys.json | grep -o '"key":"[^"]*"' | cut -d'"' -f4)
-          
-          if [ -n "$IV" ] && [ -n "$KEY" ]; then
-            echo "获取到密钥，开始解密..."
-            
-            # 安装解密工具
-            brew install img4tool
-            pip3 install pyimg4
-            
-            # 解密
-            img4tool -d "$SYSTEM_DMG" -o decrypted.dmg -i "$IV" -k "$KEY"
-            
-            # 挂载
-            sudo hdiutil attach decrypted.dmg -mountpoint /Volumes/System -nobrowse
-            
-            # 复制文件
-            for daemon in amfid installd sandboxd trustd; do
-              FOUND=$(sudo find /Volumes/System -name "$daemon" -type f 2>/dev/null | head -1)
-              if [ -n "$FOUND" ]; then
-                sudo cp "$FOUND" ios_extracted/daemons/
-              fi
-            done
-            
-            sudo hdiutil detach /Volumes/System -force
-          else
-            echo "无法获取密钥，固件可能未公开"
-          fi
+          # 尝试挂载（可能加密）
+          sudo hdiutil attach "$SYSTEM_DMG" -mountpoint /Volumes/System -nobrowse -readonly || {
+            echo "DMG 加密，需要密钥"
+            exit 1
+          }
 
-      - name: Extract strings directly from IPSW (last resort)
-        if: failure()
+      - name: Search mounted volume
+        if: success()
         run: |
-          echo "=== 从 IPSW 直接提取字符串 ==="
-          strings firmware.ipsw | grep -E "amfid|installd|sandboxd|trustd|AMFI|Security|com.apple.amfi|com.apple.sandbox" > ios_extracted/ipsw_strings.txt
-          echo "提取了 $(wc -l < ios_extracted/ipsw_strings.txt) 行关键字符串"
+          echo "搜索挂载的卷..."
+          ls -la /Volumes/System/
+          
+          for daemon in amfid installd sandboxd trustd; do
+            FOUND=$(sudo find /Volumes/System -name "$daemon" -type f 2>/dev/null | head -1)
+            if [ -n "$FOUND" ]; then
+              echo "找到 $daemon: $FOUND"
+              sudo cp "$FOUND" ios_extracted/daemons/
+            fi
+          done
+          
+          DYLD=$(sudo find /Volumes/System -name "dyld_shared_cache*" -type f 2>/dev/null | head -1)
+          if [ -n "$DYLD" ]; then
+            echo "找到 dyld: $DYLD"
+            sudo cp "$DYLD" ios_extracted/dyld_cache/
+          fi
+          
+          AMFI=$(sudo find /Volumes/System -type d -name "AppleMobileFileIntegrity.framework" 2>/dev/null | head -1)
+          if [ -n "$AMFI" ]; then
+            echo "找到 AMFI: $AMFI"
+            sudo cp -R "$AMFI" ios_extracted/frameworks/
+          fi
+          
+          SECURITY=$(sudo find /Volumes/System -type d -name "Security.framework" 2>/dev/null | head -1)
+          if [ -n "$SECURITY" ]; then
+            echo "找到 Security: $SECURITY"
+            sudo cp -R "$SECURITY" ios_extracted/frameworks/
+          fi
+          
+          sudo hdiutil detach /Volumes/System -force
+
+      - name: Last resort - extract strings from IPSW
+        if: always()
+        run: |
+          echo "从 IPSW 提取字符串..."
+          strings firmware.ipsw | grep -E "amfid|installd|sandboxd|trustd|AMFI|Security|com.apple.amfi|com.apple.sandbox" > ios_extracted/ipsw_strings.txt || true
+          echo "提取了 $(wc -l < ios_extracted/ipsw_strings.txt) 行字符串"
 
       - name: Fix permissions
         run: |
