@@ -17,7 +17,6 @@ jobs:
         run: |
           brew tap blacktop/tap
           brew install ipsw
-          pip3 install pyimg4 --break-system-packages
           ipsw version
 
       - name: Create output directories
@@ -28,53 +27,26 @@ jobs:
           curl -L -o firmware.ipsw "https://updates.cdn-apple.com/2026WinterFCS/fullrestores/047-83292/FC308431-84C0-4001-9A24-09FC77486C76/iPhone11,2,iPhone11,4,iPhone11,6_18.7.6_22H320_Restore.ipsw"
           ls -lh firmware.ipsw
 
-      - name: Extract IPSW
+      - name: Extract and decrypt all files from IPSW
         run: |
-          unzip -q firmware.ipsw -d firmware/
-          ls -lh firmware/
+          # 使用 ipsw 直接提取并解密所有内容，自动处理 IMG4 和 AEA 加密
+          ipsw extract firmware.ipsw -o firmware_decrypted 2>&1
+          echo "提取完成，目录内容："
+          ls -lh firmware_decrypted/
 
-      - name: Process AEA encrypted DMGs
+      - name: Mount all decrypted DMGs
         run: |
-          echo "解包 AEA 文件..."
-          for AEA in firmware/*.dmg.aea; do
-            if [ -f "$AEA" ]; then
-              BASENAME=$(basename "$AEA" .aea)
-              echo "处理: $BASENAME"
-              # ipsw aea extract 直接输出解密的 DMG 文件
-              ipsw aea extract "$AEA" -o "firmware/${BASENAME}.decrypted.dmg" 2>&1 && echo "  成功" || echo "  失败"
-            fi
-          done
-          ls -lh firmware/*.decrypted.dmg 2>/dev/null || echo "无 AEA 解出文件"
-
-      - name: Decrypt all DMGs (IMG4)
-        run: |
-          echo "解密 IMG4 格式的 DMG..."
-          # 收集所有非 AEA 的 DMG 文件（包括 .dmg 和 .decrypted.dmg）
-          DMG_FILES=$(ls firmware/*.dmg firmware/*.decrypted.dmg 2>/dev/null | grep -v ".dmg.aea" | sort -u)
-          for DMG in $DMG_FILES; do
-            if [ -f "$DMG" ]; then
-              BASENAME=$(basename "$DMG")
-              echo "解密: $BASENAME"
-              OUTDIR="decrypted_${BASENAME}.tmp"
-              mkdir -p "$OUTDIR"
-              # 提取 IM4P payload，输出到目录
-              ipsw img4 extract --im4p -o "$OUTDIR" "$DMG" 2>&1
-              if [ -f "$OUTDIR/payload" ]; then
-                mv "$OUTDIR/payload" "decrypted_${BASENAME}"
-                rm -rf "$OUTDIR"
-                echo "  成功"
-              else
-                echo "  失败"
-                rm -rf "$OUTDIR"
-              fi
-            fi
-          done
-          ls -lh decrypted_*.dmg 2>/dev/null || echo "无解密文件"
-
-      - name: Mount ALL decrypted DMGs
-        run: |
+          echo "查找所有可挂载的 DMG 文件..."
+          # 在解密目录中递归查找所有 .dmg 文件（包括可能嵌套的）
+          DMG_LIST=$(find firmware_decrypted -type f -name "*.dmg" 2>/dev/null)
+          if [ -z "$DMG_LIST" ]; then
+            echo "未找到任何 DMG 文件"
+            exit 0
+          fi
+          echo "找到的 DMG 文件:"
+          echo "$DMG_LIST"
           INDEX=1
-          for DMG in decrypted_*.dmg; do
+          for DMG in $DMG_LIST; do
             if [ -f "$DMG" ] && [ -s "$DMG" ]; then
               BASENAME=$(basename "$DMG")
               MOUNTPOINT="/Volumes/dmg_$INDEX"
@@ -83,26 +55,27 @@ jobs:
                 sudo hdiutil detach "$MOUNTPOINT" -force 2>/dev/null || true
                 sleep 1
               fi
-              sudo hdiutil attach "$DMG" -mountpoint "$MOUNTPOINT" -nobrowse -readonly 2>&1
-              if [ -d "$MOUNTPOINT" ] && [ "$(ls -A "$MOUNTPOINT" 2>/dev/null)" ]; then
-                echo "  成功"
+              # 尝试挂载，显示错误信息以便调试
+              if sudo hdiutil attach "$DMG" -mountpoint "$MOUNTPOINT" -nobrowse -readonly 2>&1; then
+                echo "  挂载成功"
                 INDEX=$((INDEX + 1))
               else
-                echo "  失败，尝试自动挂载..."
+                echo "  挂载失败，尝试自动挂载..."
                 AUTO_OUT=$(sudo hdiutil attach "$DMG" -nobrowse -readonly 2>&1)
                 AUTO_MOUNT=$(echo "$AUTO_OUT" | grep -o '/Volumes/[^ ]*' | head -1)
                 if [ -n "$AUTO_MOUNT" ]; then
                   ln -sf "$AUTO_MOUNT" "$MOUNTPOINT" && echo "  自动挂载 -> $AUTO_MOUNT"
                   INDEX=$((INDEX + 1))
                 else
-                  echo "  完全失败"
+                  echo "  完全挂载失败"
                 fi
               fi
             fi
           done
+          echo "挂载点列表:"
           ls -d /Volumes/dmg_* 2>/dev/null || echo "无挂载点"
 
-      - name: Search Sandbox in all DMGs
+      - name: Search Sandbox folder in all mounted DMGs
         run: |
           echo "搜索 Sandbox 文件夹..."
           for VOL in /Volumes/dmg_*; do
@@ -114,9 +87,10 @@ jobs:
               done
             fi
           done
-          ls -lhR extracted/sandbox/ 2>/dev/null || echo "未找到 Sandbox"
+          echo "Sandbox 提取结果:"
+          ls -lhR extracted/sandbox/ 2>/dev/null || echo "  未找到 Sandbox"
 
-      - name: Search daemons and frameworks in all DMGs
+      - name: Search daemons and frameworks in all mounted DMGs
         run: |
           echo "搜索 daemons 和 frameworks..."
           for VOL in /Volumes/dmg_*; do
@@ -141,27 +115,43 @@ jobs:
 
       - name: Extract kernelcache
         run: |
-          KERNEL=$(find firmware -name "kernelcache.release*" -type f 2>/dev/null | head -1)
+          # 在解密目录中查找 kernelcache.release 文件
+          KERNEL=$(find firmware_decrypted -name "kernelcache.release*" -type f 2>/dev/null | head -1)
+          if [ -z "$KERNEL" ]; then
+            # 如果 ipsw 提取后名称不同，再搜一下 Firmware 子目录
+            KERNEL=$(find firmware_decrypted -name "kernelcache*" -type f 2>/dev/null | head -1)
+          fi
           if [ -n "$KERNEL" ]; then
-            echo "处理: $KERNEL"
-            cp "$KERNEL" extracted/kernel/
-            # kernelcache 也是 IMG4，同样提取 IM4P
-            KDEC_DIR="extracted/kernel/kernelcache.tmp"
-            mkdir -p "$KDEC_DIR"
-            ipsw img4 extract --im4p -o "$KDEC_DIR" "$KERNEL" 2>&1
-            if [ -f "$KDEC_DIR/payload" ]; then
-              mv "$KDEC_DIR/payload" extracted/kernel/kernelcache.decrypted
-              rm -rf "$KDEC_DIR"
-              echo "解密成功，解包..."
-              ipsw kernel decache extracted/kernel/kernelcache.decrypted 2>&1 || echo "解包失败"
+            echo "找到 kernelcache: $KERNEL"
+            cp "$KERNEL" extracted/kernel/kernelcache.original
+            # 如果文件是 IMG4 格式，提取 IM4P payload
+            if file "$KERNEL" | grep -q "img4"; then
+              TMPDIR="extracted/kernel/kc_tmp"
+              mkdir -p "$TMPDIR"
+              ipsw img4 extract --im4p -o "$TMPDIR" "$KERNEL" 2>&1
+              if [ -f "$TMPDIR/payload" ]; then
+                mv "$TMPDIR/payload" extracted/kernel/kernelcache.decrypted
+                rm -rf "$TMPDIR"
+                echo "IM4P payload 已提取"
+              else
+                echo "未找到 IM4P payload，可能已解密"
+                cp "$KERNEL" extracted/kernel/kernelcache.decrypted
+                rm -rf "$TMPDIR"
+              fi
             else
-              echo "解密失败或无需解密，保留原文件"
-              rm -rf "$KDEC_DIR"
+              # 如果不是 IMG4，直接作为解密后的文件
+              cp "$KERNEL" extracted/kernel/kernelcache.decrypted
+            fi
+            # 解包 kernelcache
+            if [ -f extracted/kernel/kernelcache.decrypted ]; then
+              echo "解包 kernelcache..."
+              ipsw kernel decache extracted/kernel/kernelcache.decrypted 2>&1 || echo "解包失败（可能已解包或格式不支持）"
             fi
           else
             echo "未找到 kernelcache"
           fi
-          ls -lhR extracted/kernel/ 2>/dev/null
+          echo "Kernel 目录:"
+          ls -lhR extracted/kernel/ 2>/dev/null || echo "  无文件"
 
       - name: Unmount all
         if: always()
