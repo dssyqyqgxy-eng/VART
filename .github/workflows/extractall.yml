@@ -1,0 +1,148 @@
+name: Advanced Reverse Engineering
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: macos-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract frameworks from zip
+        run: |
+          echo "解压 frameworks..."
+          unzip -q amfid.zip -d extracted_frameworks/
+          echo "解压后的文件:"
+          find extracted_frameworks -type f -name "Security" -o -name "AppleMobileFileIntegrity" 2>/dev/null
+          echo "目录结构:"
+          find extracted_frameworks -type d | head -20
+
+      - name: Install advanced analysis tools
+        run: |
+          brew install radare2
+          brew install class-dump
+          brew install binutils
+
+      - name: Create output directories
+        run: |
+          mkdir -p analysis/{symbols,strings,classes,disasm,decompiled}
+
+      - name: Analyze amfid
+        run: |
+          echo "=== 深度分析 amfid ==="
+          if [ -f amfid ]; then
+            file amfid
+            nm -C -a amfid > analysis/symbols/amfid_symbols.txt 2>&1
+            strings -n 8 amfid | sort -u > analysis/strings/amfid_strings.txt 2>&1
+            nm -gU amfid > analysis/symbols/amfid_exports.txt 2>&1
+            class-dump -H -o analysis/classes/amfid_headers amfid 2>&1
+            r2 -q -c 'aaa; aac; aaft; s main; pdf' amfid > analysis/disasm/amfid_main.txt 2>&1
+            r2 -q -c 'aaa; afl' amfid > analysis/disasm/amfid_functions.txt 2>&1
+            r2 -q -c 'aaa; axt main' amfid > analysis/disasm/amfid_xrefs.txt 2>&1
+            r2 -q -c 'aaa; aac; pdc @ main' amfid > analysis/decompiled/amfid_main.c 2>&1
+          else
+            echo "amfid 文件不存在"
+          fi
+
+      - name: Analyze installd
+        run: |
+          echo "=== 深度分析 installd ==="
+          if [ -f installd ]; then
+            file installd
+            nm -C -a installd > analysis/symbols/installd_symbols.txt 2>&1
+            strings -n 8 installd | sort -u > analysis/strings/installd_strings.txt 2>&1
+            nm -gU installd > analysis/symbols/installd_exports.txt 2>&1
+            class-dump -H -o analysis/classes/installd_headers installd 2>&1
+            r2 -q -c 'aaa; aac; aaft; s main; pdf' installd > analysis/disasm/installd_main.txt 2>&1
+            r2 -q -c 'aaa; afl' installd > analysis/disasm/installd_functions.txt 2>&1
+            r2 -q -c 'aaa; axt main' installd > analysis/disasm/installd_xrefs.txt 2>&1
+            r2 -q -c 'aaa; aac; pdc @ main' installd > analysis/decompiled/installd_main.c 2>&1
+          else
+            echo "installd 文件不存在"
+          fi
+
+      - name: Analyze trustd
+        run: |
+          echo "=== 深度分析 trustd ==="
+          if [ -f trustd ]; then
+            file trustd
+            nm -C -a trustd > analysis/symbols/trustd_symbols.txt 2>&1
+            strings -n 8 trustd | sort -u > analysis/strings/trustd_strings.txt 2>&1
+            nm -gU trustd > analysis/symbols/trustd_exports.txt 2>&1
+            class-dump -H -o analysis/classes/trustd_headers trustd 2>&1
+            r2 -q -c 'aaa; aac; aaft; s main; pdf' trustd > analysis/disasm/trustd_main.txt 2>&1
+            r2 -q -c 'aaa; afl' trustd > analysis/disasm/trustd_functions.txt 2>&1
+            r2 -q -c 'aaa; axt main' trustd > analysis/disasm/trustd_xrefs.txt 2>&1
+            r2 -q -c 'aaa; aac; pdc @ main' trustd > analysis/decompiled/trustd_main.c 2>&1
+          else
+            echo "trustd 文件不存在"
+          fi
+
+      - name: Analyze Security.framework
+        run: |
+          echo "=== 深度分析 Security.framework ==="
+          FRAMEWORK_BIN=$(find extracted_frameworks -type f -name "Security" 2>/dev/null | head -1)
+          if [ -n "$FRAMEWORK_BIN" ]; then
+            echo "找到: $FRAMEWORK_BIN"
+            file "$FRAMEWORK_BIN"
+            nm -C -a "$FRAMEWORK_BIN" > analysis/symbols/security_symbols.txt 2>&1
+            strings -n 8 "$FRAMEWORK_BIN" | sort -u > analysis/strings/security_strings.txt 2>&1
+            nm -gU "$FRAMEWORK_BIN" > analysis/symbols/security_exports.txt 2>&1
+            class-dump -H -o analysis/classes/security_headers "$FRAMEWORK_BIN" 2>&1
+            r2 -q -c 'aaa; afl' "$FRAMEWORK_BIN" > analysis/disasm/security_functions.txt 2>&1
+            for FUNC in $(nm -gU "$FRAMEWORK_BIN" | awk '{print $3}' | head -20); do
+              r2 -q -c "aaa; s sym.$FUNC; pdf" "$FRAMEWORK_BIN" >> analysis/disasm/security_key_functions.txt 2>&1
+            done
+          else
+            echo "未找到 Security 二进制文件"
+          fi
+
+      - name: Analyze AppleMobileFileIntegrity.framework
+        run: |
+          echo "=== 深度分析 AppleMobileFileIntegrity.framework ==="
+          FRAMEWORK_BIN=$(find extracted_frameworks -type f -name "AppleMobileFileIntegrity" 2>/dev/null | head -1)
+          if [ -n "$FRAMEWORK_BIN" ]; then
+            echo "找到: $FRAMEWORK_BIN"
+            file "$FRAMEWORK_BIN"
+            nm -C -a "$FRAMEWORK_BIN" > analysis/symbols/amfi_symbols.txt 2>&1
+            strings -n 8 "$FRAMEWORK_BIN" | sort -u > analysis/strings/amfi_strings.txt 2>&1
+            nm -gU "$FRAMEWORK_BIN" > analysis/symbols/amfi_exports.txt 2>&1
+            class-dump -H -o analysis/classes/amfi_headers "$FRAMEWORK_BIN" 2>&1
+            r2 -q -c 'aaa; afl' "$FRAMEWORK_BIN" > analysis/disasm/amfi_functions.txt 2>&1
+            for FUNC in $(nm -gU "$FRAMEWORK_BIN" | awk '{print $3}' | head -20); do
+              r2 -q -c "aaa; s sym.$FUNC; pdf" "$FRAMEWORK_BIN" >> analysis/disasm/amfi_key_functions.txt 2>&1
+            done
+          else
+            echo "未找到 AppleMobileFileIntegrity 二进制文件"
+          fi
+
+      - name: Generate analysis report
+        run: |
+          echo "# 逆向分析报告" > analysis/REPORT.md
+          echo "## 分析时间: $(date)" >> analysis/REPORT.md
+          echo "" >> analysis/REPORT.md
+          
+          for BIN in amfid installd trustd; do
+            if [ -f "$BIN" ]; then
+              echo "### $BIN" >> analysis/REPORT.md
+              echo "- 类型: $(file $BIN | cut -d: -f2-)" >> analysis/REPORT.md
+              echo "- 导出函数数: $(nm -gU $BIN 2>/dev/null | wc -l)" >> analysis/REPORT.md
+              echo "- 总符号数: $(nm -a $BIN 2>/dev/null | wc -l)" >> analysis/REPORT.md
+              echo "" >> analysis/REPORT.md
+            fi
+          done
+
+      - name: Upload analysis results
+        uses: actions/upload-artifact@v4
+        with:
+          name: reverse_engineering_results
+          path: analysis/
+          retention-days: 90
