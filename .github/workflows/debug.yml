@@ -45,7 +45,21 @@ jobs:
             if [ -f "$DMG" ]; then
               BASENAME=$(basename "$DMG")
               echo "解密: $BASENAME"
-              ipsw img4 extract "$DMG" "decrypted_$BASENAME" 2>/dev/null
+              
+              python3 << EOF
+from pyimg4 import IMG4
+import sys
+try:
+    img4 = IMG4('$DMG')
+    data = img4.decrypt()
+    with open('decrypted_$BASENAME', 'wb') as f:
+        f.write(data)
+    print('解密成功')
+except Exception as e:
+    print(f'解密失败: {e}', file=sys.stderr)
+    sys.exit(1)
+EOF
+              
               if [ -f "decrypted_$BASENAME" ] && [ -s "decrypted_$BASENAME" ]; then
                 echo "  成功"
               else
@@ -115,29 +129,42 @@ jobs:
               done
             fi
           done
+          
+          echo "提取结果汇总:"
+          echo "Daemons:"
+          ls -lh extracted/daemons/ 2>/dev/null || echo "  无文件"
+          echo "Frameworks:"
+          ls -lh extracted/frameworks/ 2>/dev/null || echo "  无文件"
 
       - name: Extract kernelcache
         run: |
           echo "处理 kernelcache..."
           
-          # 查找 kernelcache.release 文件
           KERNELCACHE=$(find firmware -name "kernelcache.release*" -type f 2>/dev/null | head -1)
           
           if [ -n "$KERNELCACHE" ]; then
             echo "找到 kernelcache: $KERNELCACHE"
             cp "$KERNELCACHE" extracted/kernel/
             
-            # 解密 kernelcache（如果需要）
             if file "$KERNELCACHE" | grep -q "img4"; then
-              echo "kernelcache 是 IMG4 格式，正在解密..."
-              ipsw img4 extract "$KERNELCACHE" extracted/kernel/kernelcache.decrypted 2>/dev/null
+              echo "解密 kernelcache..."
+              python3 << EOF
+from pyimg4 import IMG4
+try:
+    img4 = IMG4('$KERNELCACHE')
+    data = img4.decrypt()
+    with open('extracted/kernel/kernelcache.decrypted', 'wb') as f:
+        f.write(data)
+    print('解密成功')
+except Exception as e:
+    print(f'解密失败: {e}')
+EOF
             fi
             
-            # 使用 ipsw 解包 kernelcache
-            echo "解包 kernelcache..."
-            ipsw kernel decache extracted/kernel/kernelcache.decrypted 2>/dev/null || \
-            ipsw kernel decache "$KERNELCACHE" 2>/dev/null || \
-            echo "kernelcache 解包失败，保留原始文件"
+            if [ -f extracted/kernel/kernelcache.decrypted ]; then
+              echo "解包 kernelcache..."
+              ipsw kernel decache extracted/kernel/kernelcache.decrypted 2>/dev/null || echo "解包失败"
+            fi
           else
             echo "未找到 kernelcache.release"
           fi
