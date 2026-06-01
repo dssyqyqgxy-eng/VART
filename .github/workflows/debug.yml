@@ -45,7 +45,16 @@ jobs:
             if [ -f "$DMG" ]; then
               BASENAME=$(basename "$DMG")
               echo "解密: $BASENAME"
-              python3 -c "from pyimg4 import IMG4; img4 = IMG4('${DMG}'); data = img4.decrypt(); f = open('decrypted_${BASENAME}', 'wb'); f.write(data); f.close(); print('OK')"
+              python3 -c "
+from pyimg4 import IMG4
+with open('${DMG}', 'rb') as f:
+    data = f.read()
+img4 = IMG4(data)
+decrypted = img4.decrypt()
+with open('decrypted_${BASENAME}', 'wb') as f:
+    f.write(decrypted)
+print('OK')
+"
               if [ -f "decrypted_$BASENAME" ] && [ -s "decrypted_$BASENAME" ]; then
                 echo "  成功"
               else
@@ -128,7 +137,16 @@ jobs:
             cp "$KERNELCACHE" extracted/kernel/
             if file "$KERNELCACHE" | grep -q "img4"; then
               echo "解密 kernelcache..."
-              python3 -c "from pyimg4 import IMG4; img4 = IMG4('${KERNELCACHE}'); data = img4.decrypt(); f = open('extracted/kernel/kernelcache.decrypted', 'wb'); f.write(data); f.close(); print('OK')"
+              python3 -c "
+from pyimg4 import IMG4
+with open('${KERNELCACHE}', 'rb') as f:
+    data = f.read()
+img4 = IMG4(data)
+decrypted = img4.decrypt()
+with open('extracted/kernel/kernelcache.decrypted', 'wb') as f:
+    f.write(decrypted)
+print('OK')
+"
             fi
             if [ -f extracted/kernel/kernelcache.decrypted ]; then
               echo "解包 kernelcache..."
