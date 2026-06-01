@@ -19,7 +19,6 @@ jobs:
           brew install ipsw
           pip3 install pyimg4 --break-system-packages
           ipsw version
-          python3 -c "from pyimg4 import IMG4; print('pyimg4 OK')"
 
       - name: Create output directories
         run: mkdir -p extracted/daemons extracted/frameworks extracted/sandbox extracted/kernel
@@ -34,16 +33,34 @@ jobs:
           unzip -q firmware.ipsw -d firmware/
           ls -lh firmware/
 
-      - name: Decrypt all DMGs
+      - name: Process AEA files (encrypted DMGs)
         run: |
-          # 用 base64 解码生成解密脚本，零转义问题
-          base64 -d <<< "aW1wb3J0IHN5cwpmcm9tIHB5aW1nNCBpbXBvcnQgSU1HNApkbWdfcGF0aCA9IHN5cy5hcmd2WzFdCm91dF9wYXRoID0gc3lzLmFyZ3ZbMl0Kd2l0aCBvcGVuKGRtZ19wYXRoLCAncmInKSBhcyBmOgogICAgZGF0YSA9IGYucmVhZCgpCmltZzQgPSBJTUsZChkYXRhKQpkZWNyeXB0ZWQgPSBpbWc0LmRlY3J5cHQoKQp3aXRoIG9wZW4ob3V0X3BhdGgsICd3YicpIGFzIGY6CiAgICBmLndyaXRlKGRlY3J5cHRlZCkKcHJpbnQoJ29rJyk=" > decrypt.py
-          ls -lh firmware/*.dmg 2>/dev/null || echo "未找到DMG"
-          for DMG in firmware/*.dmg; do
+          echo "解包 AEA 文件..."
+          for AEA in firmware/*.dmg.aea; do
+            if [ -f "$AEA" ]; then
+              BASENAME=$(basename "$AEA" .aea)
+              echo "处理: $BASENAME"
+              ipsw aea extract "$AEA" -o "firmware/${BASENAME}.decrypted.dmg" 2>&1 || echo "  失败"
+            fi
+          done
+          # 移动解密的 DMG 到 firmware 目录，以便后续统一处理
+          ls -lh firmware/*.decrypted.dmg 2>/dev/null || echo "没有生成解密的 DMG"
+
+      - name: Decrypt DMGs (IMG4)
+        run: |
+          echo "解密 IMG4 格式的 DMG..."
+          # 收集所有需要解密的文件（原始 .dmg 和 .aea 解出的 .decrypted.dmg）
+          DMG_LIST=$(ls firmware/*.dmg firmware/*.decrypted.dmg 2>/dev/null | grep -v ".dmg.aea")
+          for DMG in $DMG_LIST; do
             if [ -f "$DMG" ]; then
               BASENAME=$(basename "$DMG")
               echo "解密: $BASENAME"
-              python3 decrypt.py "$DMG" "decrypted_$BASENAME" && echo "  成功" || echo "  失败"
+              ipsw img4 extract -i "$DMG" -o "decrypted_${BASENAME}" 2>&1
+              if [ -f "decrypted_${BASENAME}" ] && [ -s "decrypted_${BASENAME}" ]; then
+                echo "  成功"
+              else
+                echo "  失败"
+              fi
             fi
           done
           ls -lh decrypted_*.dmg 2>/dev/null || echo "无解密文件"
@@ -60,12 +77,20 @@ jobs:
                 sudo hdiutil detach "$MOUNTPOINT" -force 2>/dev/null || true
                 sleep 1
               fi
-              sudo hdiutil attach "$DMG" -mountpoint "$MOUNTPOINT" -nobrowse -readonly 2>/dev/null
+              sudo hdiutil attach "$DMG" -mountpoint "$MOUNTPOINT" -nobrowse -readonly 2>&1
               if [ -d "$MOUNTPOINT" ] && [ "$(ls -A "$MOUNTPOINT" 2>/dev/null)" ]; then
                 echo "  成功"
                 INDEX=$((INDEX + 1))
               else
-                echo "  失败"
+                echo "  失败，尝试自动挂载..."
+                AUTO_OUT=$(sudo hdiutil attach "$DMG" -nobrowse -readonly 2>&1)
+                AUTO_MOUNT=$(echo "$AUTO_OUT" | grep -o '/Volumes/[^ ]*' | head -1)
+                if [ -n "$AUTO_MOUNT" ]; then
+                  ln -sf "$AUTO_MOUNT" "$MOUNTPOINT" && echo "  自动挂载 -> $AUTO_MOUNT"
+                  INDEX=$((INDEX + 1))
+                else
+                  echo "  完全失败"
+                fi
               fi
             fi
           done
@@ -76,15 +101,14 @@ jobs:
           echo "搜索 Sandbox 文件夹..."
           for VOL in /Volumes/dmg_*; do
             if [ -d "$VOL" ]; then
-              echo "搜索卷: $VOL"
-              sudo find "$VOL" -type d -name "Sandbox" 2>/dev/null | while read -r DIR; do
+              echo "搜索: $VOL"
+              sudo find -L "$VOL" -type d -name "Sandbox" 2>/dev/null | while read -r DIR; do
                 echo "  找到: $DIR"
                 cp -R "$DIR" extracted/sandbox/ 2>/dev/null || sudo cp -R "$DIR" extracted/sandbox/ 2>/dev/null
               done
             fi
           done
-          echo "Sandbox 结果:"
-          ls -lhR extracted/sandbox/ 2>/dev/null || echo "  未找到"
+          ls -lhR extracted/sandbox/ 2>/dev/null || echo "未找到 Sandbox"
 
       - name: Search daemons and frameworks in all DMGs
         run: |
@@ -93,42 +117,39 @@ jobs:
             if [ -d "$VOL" ]; then
               echo "搜索卷: $VOL"
               for DAEMON in amfid installd sandboxd trustd; do
-                sudo find "$VOL" -type f -name "$DAEMON" 2>/dev/null | while read -r FILE; do
-                  echo "  找到 daemon: $FILE"
+                sudo find -L "$VOL" -type f -name "$DAEMON" 2>/dev/null | while read -r FILE; do
+                  echo "  daemon: $FILE"
                   sudo cp "$FILE" extracted/daemons/ 2>/dev/null
                 done
               done
-              for FRAMEWORK in AppleMobileFileIntegrity Security; do
-                sudo find "$VOL" -type d -name "${FRAMEWORK}.framework" 2>/dev/null | while read -r DIR; do
-                  echo "  找到 framework: $DIR"
+              for FW in AppleMobileFileIntegrity Security; do
+                sudo find -L "$VOL" -type d -name "${FW}.framework" 2>/dev/null | while read -r DIR; do
+                  echo "  framework: $DIR"
                   sudo cp -R "$DIR" extracted/frameworks/ 2>/dev/null
                 done
               done
             fi
           done
-          echo "提取结果:"
-          echo "Daemons:" && ls -lh extracted/daemons/ 2>/dev/null || echo "  无"
-          echo "Frameworks:" && ls -lh extracted/frameworks/ 2>/dev/null || echo "  无"
+          echo "Daemons:" && ls extracted/daemons/ 2>/dev/null || echo "  无"
+          echo "Frameworks:" && ls extracted/frameworks/ 2>/dev/null || echo "  无"
 
       - name: Extract kernelcache
         run: |
-          echo "处理 kernelcache..."
-          KERNELCACHE=$(find firmware -name "kernelcache.release*" -type f 2>/dev/null | head -1)
-          if [ -n "$KERNELCACHE" ]; then
-            echo "找到: $KERNELCACHE"
-            cp "$KERNELCACHE" extracted/kernel/
-            if file "$KERNELCACHE" | grep -q "img4"; then
-              echo "解密 kernelcache..."
-              python3 decrypt.py "$KERNELCACHE" extracted/kernel/kernelcache.decrypted && echo "解密成功" || echo "解密失败"
-            fi
-            if [ -f extracted/kernel/kernelcache.decrypted ]; then
-              echo "解包..."
-              ipsw kernel decache extracted/kernel/kernelcache.decrypted 2>/dev/null || echo "解包失败"
+          KERNEL=$(find firmware -name "kernelcache.release*" -type f 2>/dev/null | head -1)
+          if [ -n "$KERNEL" ]; then
+            echo "处理: $KERNEL"
+            cp "$KERNEL" extracted/kernel/
+            ipsw img4 extract -i "$KERNEL" -o extracted/kernel/kernelcache.decrypted 2>&1
+            if [ -f extracted/kernel/kernelcache.decrypted ] && [ -s extracted/kernel/kernelcache.decrypted ]; then
+              echo "解密成功，解包..."
+              ipsw kernel decache extracted/kernel/kernelcache.decrypted 2>&1 || echo "解包失败"
+            else
+              echo "解密失败或无需解密"
             fi
           else
-            echo "未找到 kernelcache.release"
+            echo "未找到 kernelcache"
           fi
-          echo "Kernel 结果:" && ls -lhR extracted/kernel/ 2>/dev/null || echo "  无"
+          ls -lhR extracted/kernel/ 2>/dev/null
 
       - name: Unmount all
         if: always()
