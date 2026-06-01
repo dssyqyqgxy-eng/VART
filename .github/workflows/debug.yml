@@ -1,4 +1,4 @@
-name: Decrypt, Mount All DMGs and Extract
+name: Extract Binaries, Frameworks, Sandbox and Kernel
 
 on:
   push:
@@ -13,163 +13,72 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - name: Install tools
+      - name: Install ipsw
         run: |
           brew tap blacktop/tap
           brew install ipsw
           ipsw version
-
-      - name: Create output directories
-        run: mkdir -p extracted/daemons extracted/frameworks extracted/sandbox extracted/kernel
 
       - name: Download firmware
         run: |
           curl -L -o firmware.ipsw "https://updates.cdn-apple.com/2026WinterFCS/fullrestores/047-83292/FC308431-84C0-4001-9A24-09FC77486C76/iPhone11,2,iPhone11,4,iPhone11,6_18.7.6_22H320_Restore.ipsw"
           ls -lh firmware.ipsw
 
-      - name: Extract kernel and system DMGs
+      - name: Extract required files from IPSW
         run: |
-          mkdir -p firmware_decrypted
-          # 提取 kernelcache
-          ipsw extract --kernel -o firmware_decrypted firmware.ipsw 2>&1
-          # 提取系统 DMG 和 App DMG（通常包含系统文件和应用）
-          ipsw extract --dmg sys -o firmware_decrypted firmware.ipsw 2>&1 || echo "sys DMG 提取失败"
-          ipsw extract --dmg app -o firmware_decrypted firmware.ipsw 2>&1 || echo "app DMG 提取失败"
-          # 如果有其他 DMG（如 fs），也尝试提取
-          ipsw extract --dmg fs -o firmware_decrypted firmware.ipsw 2>/dev/null || true
-          echo "提取完成，目录结构："
-          ls -lhR firmware_decrypted/
+          mkdir -p extracted/daemons extracted/frameworks extracted/sandbox extracted/kernel
 
-      - name: Decrypt IMG4 files (kernel & DMGs)
-        run: |
-          echo "解密 IMG4 文件..."
-          for IMG4_FILE in $(find firmware_decrypted -type f \( -name "kernelcache*" -o -name "*.dmg" \) 2>/dev/null); do
-            if [ -f "$IMG4_FILE" ]; then
-              BASENAME=$(basename "$IMG4_FILE")
-              echo "处理: $BASENAME"
-              # 检查是否为 IMG4
-              if file "$IMG4_FILE" | grep -q "img4"; then
-                OUTDIR="decrypted_${BASENAME}.tmp"
-                mkdir -p "$OUTDIR"
-                ipsw img4 extract --im4p -o "$OUTDIR" "$IMG4_FILE" 2>&1
-                if [ -f "$OUTDIR/payload" ]; then
-                  mv "$OUTDIR/payload" "decrypted_${BASENAME}"
-                  rm -rf "$OUTDIR"
-                  echo "  解密成功"
-                else
-                  echo "  未找到 payload，保留原文件"
-                  cp "$IMG4_FILE" "decrypted_${BASENAME}"
-                  rm -rf "$OUTDIR"
-                fi
-              else
-                # 非 IMG4 直接复制
-                cp "$IMG4_FILE" "decrypted_${BASENAME}"
-                echo "  非 IMG4，直接复制"
-              fi
-            fi
-          done
-          echo "解密后的文件:"
-          ls -lh decrypted_*
+          # 1. 提取内核（已自动解密）
+          echo "提取 kernelcache..."
+          ipsw extract --kernel -o extracted/kernel firmware.ipsw
 
-      - name: Mount all decrypted DMGs
-        run: |
-          INDEX=1
-          for DMG in decrypted_*.dmg; do
-            if [ -f "$DMG" ] && [ -s "$DMG" ]; then
-              BASENAME=$(basename "$DMG")
-              MOUNTPOINT="/Volumes/dmg_$INDEX"
-              echo "挂载 $INDEX: $BASENAME -> $MOUNTPOINT"
-              if [ -d "$MOUNTPOINT" ]; then
-                sudo hdiutil detach "$MOUNTPOINT" -force 2>/dev/null || true
-                sleep 1
-              fi
-              sudo hdiutil attach "$DMG" -mountpoint "$MOUNTPOINT" -nobrowse -readonly 2>&1
-              if [ -d "$MOUNTPOINT" ] && [ "$(ls -A "$MOUNTPOINT" 2>/dev/null)" ]; then
-                echo "  成功"
-                INDEX=$((INDEX + 1))
-              else
-                echo "  失败，尝试自动挂载..."
-                AUTO_OUT=$(sudo hdiutil attach "$DMG" -nobrowse -readonly 2>&1)
-                AUTO_MOUNT=$(echo "$AUTO_OUT" | grep -o '/Volumes/[^ ]*' | head -1)
-                if [ -n "$AUTO_MOUNT" ]; then
-                  ln -sf "$AUTO_MOUNT" "$MOUNTPOINT" && echo "  自动挂载 -> $AUTO_MOUNT"
-                  INDEX=$((INDEX + 1))
-                else
-                  echo "  完全挂载失败"
-                fi
-              fi
-            fi
-          done
-          ls -d /Volumes/dmg_* 2>/dev/null || echo "无挂载点"
+          # 2. 提取守护进程二进制（匹配路径末尾为 amfid, installd, sandboxd, trustd）
+          echo "提取 daemons..."
+          ipsw extract --files --pattern '(?i)(amfid|installd|sandboxd|trustd)$' \
+            --flat -o extracted/daemons firmware.ipsw
 
-      - name: Search Sandbox in all mounted DMGs
-        run: |
-          echo "搜索 Sandbox 文件夹..."
-          for VOL in /Volumes/dmg_*; do
-            if [ -d "$VOL" ]; then
-              echo "搜索卷: $VOL"
-              sudo find -L "$VOL" -type d -name "Sandbox" 2>/dev/null | while read -r DIR; do
-                echo "  找到: $DIR"
-                cp -R "$DIR" extracted/sandbox/ 2>/dev/null || sudo cp -R "$DIR" extracted/sandbox/ 2>/dev/null
-              done
-            fi
-          done
-          ls -lhR extracted/sandbox/ 2>/dev/null || echo "未找到 Sandbox"
+          # 3. 提取整个框架目录（保留目录结构）
+          echo "提取 AppleMobileFileIntegrity.framework..."
+          ipsw extract --files --pattern 'AppleMobileFileIntegrity\.framework/' \
+            -o extracted/frameworks firmware.ipsw
 
-      - name: Search daemons and frameworks in all mounted DMGs
-        run: |
-          echo "搜索 daemons 和 frameworks..."
-          for VOL in /Volumes/dmg_*; do
-            if [ -d "$VOL" ]; then
-              echo "搜索卷: $VOL"
-              for DAEMON in amfid installd sandboxd trustd; do
-                sudo find -L "$VOL" -type f -name "$DAEMON" 2>/dev/null | while read -r FILE; do
-                  echo "  daemon: $FILE"
-                  sudo cp "$FILE" extracted/daemons/ 2>/dev/null
-                done
-              done
-              for FW in AppleMobileFileIntegrity Security; do
-                sudo find -L "$VOL" -type d -name "${FW}.framework" 2>/dev/null | while read -r DIR; do
-                  echo "  framework: $DIR"
-                  sudo cp -R "$DIR" extracted/frameworks/ 2>/dev/null
-                done
-              done
-            fi
-          done
-          echo "Daemons:" && ls extracted/daemons/ 2>/dev/null || echo "  无"
-          echo "Frameworks:" && ls extracted/frameworks/ 2>/dev/null || echo "  无"
+          echo "提取 Security.framework..."
+          ipsw extract --files --pattern 'Security\.framework/' \
+            -o extracted/frameworks firmware.ipsw
 
-      - name: Process kernelcache
+          # 4. 提取 Sandbox 文件夹（保留目录结构）
+          echo "提取 Sandbox 文件夹..."
+          ipsw extract --files --pattern 'Sandbox/' \
+            -o extracted/sandbox firmware.ipsw
+
+          # 显示提取结果
+          echo ""
+          echo "==== 提取结果 ===="
+          echo "--- Daemons ---"
+          ls -lh extracted/daemons/ 2>/dev/null || echo "  无文件"
+          echo "--- Frameworks ---"
+          find extracted/frameworks -maxdepth 3 -type d 2>/dev/null || echo "  无文件"
+          echo "--- Sandbox ---"
+          find extracted/sandbox -maxdepth 3 -type d 2>/dev/null || echo "  无文件"
+          echo "--- Kernel ---"
+          ls -lh extracted/kernel/ 2>/dev/null || echo "  无文件"
+
+      - name: Process kernelcache (decompress if needed)
         run: |
-          # 已解密的 kernelcache 文件查找
-          KERNEL_DEC=$(ls decrypted_kernelcache* 2>/dev/null | head -1)
-          if [ -n "$KERNEL_DEC" ]; then
-            echo "找到解密 kernelcache: $KERNEL_DEC"
-            cp "$KERNEL_DEC" extracted/kernel/kernelcache.decrypted
-          else
-            # 可能没加密，直接找
-            KERNEL_ORIG=$(find firmware_decrypted -name "kernelcache*" -type f 2>/dev/null | head -1)
-            if [ -n "$KERNEL_ORIG" ]; then
-              cp "$KERNEL_ORIG" extracted/kernel/kernelcache.decrypted
+          # 如果 kernelcache 是压缩的，用 ipsw kernel dec 解压
+          KERNEL_FILE=$(find extracted/kernel -name "kernelcache*" -type f 2>/dev/null | head -1)
+          if [ -n "$KERNEL_FILE" ]; then
+            echo "检查 kernelcache: $KERNEL_FILE"
+            file "$KERNEL_FILE"
+            # 尝试解压（如果是 lzfse 等压缩）
+            ipsw kernel dec "$KERNEL_FILE" -o extracted/kernel/kernelcache.decompressed 2>/dev/null || true
+            if [ -f extracted/kernel/kernelcache.decompressed ]; then
+              mv extracted/kernel/kernelcache.decompressed "$KERNEL_FILE"
+              echo "kernelcache 已解压"
+            else
+              echo "kernelcache 无需解压或解压失败"
             fi
           fi
-          if [ -f extracted/kernel/kernelcache.decrypted ]; then
-            echo "解包 kernelcache..."
-            ipsw kernel decache extracted/kernel/kernelcache.decrypted 2>&1 || echo "解包失败（可能已解包或格式不支持）"
-          else
-            echo "未找到 kernelcache"
-          fi
-          echo "Kernel 结果:"
-          ls -lhR extracted/kernel/ 2>/dev/null
-
-      - name: Unmount all
-        if: always()
-        run: |
-          for VOL in /Volumes/dmg_*; do
-            if [ -d "$VOL" ]; then
-              sudo hdiutil detach "$VOL" -force 2>/dev/null || true
-            fi
-          done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
