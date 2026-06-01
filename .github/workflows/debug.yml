@@ -33,33 +33,39 @@ jobs:
           unzip -q firmware.ipsw -d firmware/
           ls -lh firmware/
 
-      - name: Process AEA files (encrypted DMGs)
+      - name: Process AEA encrypted DMGs
         run: |
           echo "解包 AEA 文件..."
           for AEA in firmware/*.dmg.aea; do
             if [ -f "$AEA" ]; then
               BASENAME=$(basename "$AEA" .aea)
               echo "处理: $BASENAME"
-              ipsw aea extract "$AEA" -o "firmware/${BASENAME}.decrypted.dmg" 2>&1 || echo "  失败"
+              # ipsw aea extract 直接输出解密的 DMG 文件
+              ipsw aea extract "$AEA" -o "firmware/${BASENAME}.decrypted.dmg" 2>&1 && echo "  成功" || echo "  失败"
             fi
           done
-          # 移动解密的 DMG 到 firmware 目录，以便后续统一处理
-          ls -lh firmware/*.decrypted.dmg 2>/dev/null || echo "没有生成解密的 DMG"
+          ls -lh firmware/*.decrypted.dmg 2>/dev/null || echo "无 AEA 解出文件"
 
-      - name: Decrypt DMGs (IMG4)
+      - name: Decrypt all DMGs (IMG4)
         run: |
           echo "解密 IMG4 格式的 DMG..."
-          # 收集所有需要解密的文件（原始 .dmg 和 .aea 解出的 .decrypted.dmg）
-          DMG_LIST=$(ls firmware/*.dmg firmware/*.decrypted.dmg 2>/dev/null | grep -v ".dmg.aea")
-          for DMG in $DMG_LIST; do
+          # 收集所有非 AEA 的 DMG 文件（包括 .dmg 和 .decrypted.dmg）
+          DMG_FILES=$(ls firmware/*.dmg firmware/*.decrypted.dmg 2>/dev/null | grep -v ".dmg.aea" | sort -u)
+          for DMG in $DMG_FILES; do
             if [ -f "$DMG" ]; then
               BASENAME=$(basename "$DMG")
               echo "解密: $BASENAME"
-              ipsw img4 extract -i "$DMG" -o "decrypted_${BASENAME}" 2>&1
-              if [ -f "decrypted_${BASENAME}" ] && [ -s "decrypted_${BASENAME}" ]; then
+              OUTDIR="decrypted_${BASENAME}.tmp"
+              mkdir -p "$OUTDIR"
+              # 提取 IM4P payload，输出到目录
+              ipsw img4 extract --im4p -o "$OUTDIR" "$DMG" 2>&1
+              if [ -f "$OUTDIR/payload" ]; then
+                mv "$OUTDIR/payload" "decrypted_${BASENAME}"
+                rm -rf "$OUTDIR"
                 echo "  成功"
               else
                 echo "  失败"
+                rm -rf "$OUTDIR"
               fi
             fi
           done
@@ -139,12 +145,18 @@ jobs:
           if [ -n "$KERNEL" ]; then
             echo "处理: $KERNEL"
             cp "$KERNEL" extracted/kernel/
-            ipsw img4 extract -i "$KERNEL" -o extracted/kernel/kernelcache.decrypted 2>&1
-            if [ -f extracted/kernel/kernelcache.decrypted ] && [ -s extracted/kernel/kernelcache.decrypted ]; then
+            # kernelcache 也是 IMG4，同样提取 IM4P
+            KDEC_DIR="extracted/kernel/kernelcache.tmp"
+            mkdir -p "$KDEC_DIR"
+            ipsw img4 extract --im4p -o "$KDEC_DIR" "$KERNEL" 2>&1
+            if [ -f "$KDEC_DIR/payload" ]; then
+              mv "$KDEC_DIR/payload" extracted/kernel/kernelcache.decrypted
+              rm -rf "$KDEC_DIR"
               echo "解密成功，解包..."
               ipsw kernel decache extracted/kernel/kernelcache.decrypted 2>&1 || echo "解包失败"
             else
-              echo "解密失败或无需解密"
+              echo "解密失败或无需解密，保留原文件"
+              rm -rf "$KDEC_DIR"
             fi
           else
             echo "未找到 kernelcache"
