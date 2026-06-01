@@ -45,18 +45,7 @@ jobs:
             if [ -f "$DMG" ]; then
               BASENAME=$(basename "$DMG")
               echo "解密: $BASENAME"
-              python3 -c "
-from pyimg4 import IMG4
-try:
-    img4 = IMG4('$DMG')
-    data = img4.decrypt()
-    with open('decrypted_$BASENAME', 'wb') as f:
-        f.write(data)
-    print('OK')
-except Exception as e:
-    print(f'Error: {e}')
-    exit(1)
-"
+              python3 -c "from pyimg4 import IMG4; img4 = IMG4('${DMG}'); data = img4.decrypt(); f = open('decrypted_${BASENAME}', 'wb'); f.write(data); f.close(); print('OK')"
               if [ -f "decrypted_$BASENAME" ] && [ -s "decrypted_$BASENAME" ]; then
                 echo "  成功"
               else
@@ -139,14 +128,7 @@ except Exception as e:
             cp "$KERNELCACHE" extracted/kernel/
             if file "$KERNELCACHE" | grep -q "img4"; then
               echo "解密 kernelcache..."
-              python3 -c "
-from pyimg4 import IMG4
-img4 = IMG4('$KERNELCACHE')
-data = img4.decrypt()
-with open('extracted/kernel/kernelcache.decrypted', 'wb') as f:
-    f.write(data)
-print('OK')
-"
+              python3 -c "from pyimg4 import IMG4; img4 = IMG4('${KERNELCACHE}'); data = img4.decrypt(); f = open('extracted/kernel/kernelcache.decrypted', 'wb'); f.write(data); f.close(); print('OK')"
             fi
             if [ -f extracted/kernel/kernelcache.decrypted ]; then
               echo "解包 kernelcache..."
