@@ -22,11 +22,7 @@ jobs:
           python3 -c "from pyimg4 import IMG4; print('pyimg4 OK')"
 
       - name: Create output directories
-        run: |
-          mkdir -p extracted/daemons
-          mkdir -p extracted/frameworks
-          mkdir -p extracted/sandbox
-          mkdir -p extracted/kernel
+        run: mkdir -p extracted/daemons extracted/frameworks extracted/sandbox extracted/kernel
 
       - name: Download firmware
         run: |
@@ -40,26 +36,14 @@ jobs:
 
       - name: Decrypt all DMGs
         run: |
+          # 用 base64 解码生成解密脚本，零转义问题
+          base64 -d <<< "aW1wb3J0IHN5cwpmcm9tIHB5aW1nNCBpbXBvcnQgSU1HNApkbWdfcGF0aCA9IHN5cy5hcmd2WzFdCm91dF9wYXRoID0gc3lzLmFyZ3ZbMl0Kd2l0aCBvcGVuKGRtZ19wYXRoLCAncmInKSBhcyBmOgogICAgZGF0YSA9IGYucmVhZCgpCmltZzQgPSBJTUsZChkYXRhKQpkZWNyeXB0ZWQgPSBpbWc0LmRlY3J5cHQoKQp3aXRoIG9wZW4ob3V0X3BhdGgsICd3YicpIGFzIGY6CiAgICBmLndyaXRlKGRlY3J5cHRlZCkKcHJpbnQoJ29rJyk=" > decrypt.py
           ls -lh firmware/*.dmg 2>/dev/null || echo "未找到DMG"
           for DMG in firmware/*.dmg; do
             if [ -f "$DMG" ]; then
               BASENAME=$(basename "$DMG")
               echo "解密: $BASENAME"
-              python3 -c "
-from pyimg4 import IMG4
-with open('${DMG}', 'rb') as f:
-    data = f.read()
-img4 = IMG4(data)
-decrypted = img4.decrypt()
-with open('decrypted_${BASENAME}', 'wb') as f:
-    f.write(decrypted)
-print('OK')
-"
-              if [ -f "decrypted_$BASENAME" ] && [ -s "decrypted_$BASENAME" ]; then
-                echo "  成功"
-              else
-                echo "  失败"
-              fi
+              python3 decrypt.py "$DMG" "decrypted_$BASENAME" && echo "  成功" || echo "  失败"
             fi
           done
           ls -lh decrypted_*.dmg 2>/dev/null || echo "无解密文件"
@@ -94,13 +78,13 @@ print('OK')
             if [ -d "$VOL" ]; then
               echo "搜索卷: $VOL"
               sudo find "$VOL" -type d -name "Sandbox" 2>/dev/null | while read -r DIR; do
-                echo "  找到 Sandbox: $DIR"
+                echo "  找到: $DIR"
                 cp -R "$DIR" extracted/sandbox/ 2>/dev/null || sudo cp -R "$DIR" extracted/sandbox/ 2>/dev/null
               done
             fi
           done
-          echo "Sandbox 提取结果:"
-          ls -lhR extracted/sandbox/ 2>/dev/null || echo "  未找到 Sandbox"
+          echo "Sandbox 结果:"
+          ls -lhR extracted/sandbox/ 2>/dev/null || echo "  未找到"
 
       - name: Search daemons and frameworks in all DMGs
         run: |
@@ -122,41 +106,29 @@ print('OK')
               done
             fi
           done
-          echo "提取结果汇总:"
-          echo "Daemons:"
-          ls -lh extracted/daemons/ 2>/dev/null || echo "  无文件"
-          echo "Frameworks:"
-          ls -lh extracted/frameworks/ 2>/dev/null || echo "  无文件"
+          echo "提取结果:"
+          echo "Daemons:" && ls -lh extracted/daemons/ 2>/dev/null || echo "  无"
+          echo "Frameworks:" && ls -lh extracted/frameworks/ 2>/dev/null || echo "  无"
 
       - name: Extract kernelcache
         run: |
           echo "处理 kernelcache..."
           KERNELCACHE=$(find firmware -name "kernelcache.release*" -type f 2>/dev/null | head -1)
           if [ -n "$KERNELCACHE" ]; then
-            echo "找到 kernelcache: $KERNELCACHE"
+            echo "找到: $KERNELCACHE"
             cp "$KERNELCACHE" extracted/kernel/
             if file "$KERNELCACHE" | grep -q "img4"; then
               echo "解密 kernelcache..."
-              python3 -c "
-from pyimg4 import IMG4
-with open('${KERNELCACHE}', 'rb') as f:
-    data = f.read()
-img4 = IMG4(data)
-decrypted = img4.decrypt()
-with open('extracted/kernel/kernelcache.decrypted', 'wb') as f:
-    f.write(decrypted)
-print('OK')
-"
+              python3 decrypt.py "$KERNELCACHE" extracted/kernel/kernelcache.decrypted && echo "解密成功" || echo "解密失败"
             fi
             if [ -f extracted/kernel/kernelcache.decrypted ]; then
-              echo "解包 kernelcache..."
+              echo "解包..."
               ipsw kernel decache extracted/kernel/kernelcache.decrypted 2>/dev/null || echo "解包失败"
             fi
           else
             echo "未找到 kernelcache.release"
           fi
-          echo "Kernel 提取结果:"
-          ls -lhR extracted/kernel/ 2>/dev/null || echo "  无文件"
+          echo "Kernel 结果:" && ls -lhR extracted/kernel/ 2>/dev/null || echo "  无"
 
       - name: Unmount all
         if: always()
