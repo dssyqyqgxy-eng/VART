@@ -28,12 +28,8 @@ jobs:
       - name: Install analysis tools
         run: |
           brew install radare2 binutils lzfse
-          
-          # class-dump
           sudo curl -L -o /usr/local/bin/class-dump https://github.com/AloneMonkey/MonkeyDev/raw/master/bin/class-dump
           sudo chmod +x /usr/local/bin/class-dump
-          
-          # Ghidra
           GHIDRA_URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.0.3_build/ghidra_11.0.3_PUBLIC_20240410.zip"
           curl -L -o ghidra.zip "$GHIDRA_URL"
           unzip -q ghidra.zip -d ghidra_install
@@ -42,22 +38,18 @@ jobs:
           echo "Ghidra: $GHIDRA_HOME"
 
       - name: Create output directories
-        run: |
-          mkdir -p analysis/{coretrust,signatures,springboard,amfi,reports,symbols,strings,disasm}
+        run: mkdir -p analysis/{coretrust,signatures,springboard,amfi,reports,symbols,strings,disasm}
 
       - name: Decompress and prepare kernelcache
         run: |
           echo "=== 准备 kernelcache ==="
           KERNELCACHE=$(find . -name "kernelcache*" -type f ! -name "*.txt" ! -name "*.md" 2>/dev/null | head -1)
-          
           if [ -n "$KERNELCACHE" ]; then
             echo "找到: $KERNELCACHE ($(ls -lh "$KERNELCACHE" | awk '{print $5}'))"
             file "$KERNELCACHE"
-            
             if file "$KERNELCACHE" | grep -q "lzfse"; then
               echo "解压 lzfse..."
               lzfse -decode -i "$KERNELCACHE" -o kernelcache.decompressed 2>&1
-              echo "解压完成: $(ls -lh kernelcache.decompressed | awk '{print $5}')"
               echo "KERNEL_TARGET=kernelcache.decompressed" >> $GITHUB_ENV
             else
               echo "KERNEL_TARGET=$KERNELCACHE" >> $GITHUB_ENV
@@ -70,179 +62,126 @@ jobs:
         run: |
           if [ -n "$KERNEL_TARGET" ] && [ -f "$KERNEL_TARGET" ]; then
             echo "=== CoreTrust 内核分析 ==="
-            
-            # 1. 搜索 CoreTrust 相关字符串
-            echo "搜索 CoreTrust 字符串..."
-            strings "$KERNEL_TARGET" | grep -i "coretrust" | sort -u > analysis/coretrust/coretrust_strings.txt 2>&1 || echo "  未找到 coretrust"
-            
-            # 2. 搜索 TrustCache
-            echo "搜索 TrustCache..."
-            strings "$KERNEL_TARGET" | grep -i "trustcache" | sort -u > analysis/coretrust/trustcache_strings.txt 2>&1 || echo "  未找到 trustcache"
-            
-            # 3. 搜索 CMS/PKCS7 签名相关
-            echo "搜索 CMS 签名..."
-            strings "$KERNEL_TARGET" | grep -iE "(CMS|PKCS7|signature)" | sort -u > analysis/coretrust/cms_strings.txt 2>&1
-            
-            # 4. 搜索 IMG4/IM4P 相关
-            echo "搜索 IMG4..."
-            strings "$KERNEL_TARGET" | grep -iE "(IMG4|IM4P|im4p|im4m|im4r)" | sort -u > analysis/coretrust/img4_strings.txt 2>&1
-            
-            # 5. 搜索 AMFI 相关
-            echo "搜索 AMFI..."
-            strings "$KERNEL_TARGET" | grep -iE "(AMFI|amfi|AppleMobileFileIntegrity)" | sort -u > analysis/coretrust/amfi_strings.txt 2>&1
-            
-            # 6. 搜索代码签名相关
-            echo "搜索代码签名..."
-            strings "$KERNEL_TARGET" | grep -iE "(codesign|entitlement|provision)" | sort -u > analysis/coretrust/codesign_strings.txt 2>&1
-            
-            # 7. 搜索 CDHash
-            strings "$KERNEL_TARGET" | grep -i "cdhash" | sort -u > analysis/coretrust/cdhash_strings.txt 2>&1
-            
-            cat analysis/coretrust/coretrust_strings.txt
+            strings "$KERNEL_TARGET" | grep -i "coretrust" | sort -u > analysis/coretrust/coretrust_strings.txt 2>&1 || true
+            strings "$KERNEL_TARGET" | grep -i "trustcache" | sort -u > analysis/coretrust/trustcache_strings.txt 2>&1 || true
+            strings "$KERNEL_TARGET" | grep -iE "(CMS|PKCS7|signature)" | sort -u > analysis/coretrust/cms_strings.txt 2>&1 || true
+            strings "$KERNEL_TARGET" | grep -iE "(IMG4|IM4P|im4p|im4m|im4r)" | sort -u > analysis/coretrust/img4_strings.txt 2>&1 || true
+            strings "$KERNEL_TARGET" | grep -iE "(AMFI|amfi|AppleMobileFileIntegrity)" | sort -u > analysis/coretrust/amfi_strings.txt 2>&1 || true
+            strings "$KERNEL_TARGET" | grep -iE "(codesign|entitlement|provision)" | sort -u > analysis/coretrust/codesign_strings.txt 2>&1 || true
+            strings "$KERNEL_TARGET" | grep -i "cdhash" | sort -u > analysis/coretrust/cdhash_strings.txt 2>&1 || true
+            echo "CoreTrust 字符串:"
+            cat analysis/coretrust/coretrust_strings.txt 2>/dev/null || echo "  未找到"
           fi
 
-      - name: Analyze daemons (amfid, installd, trustd)
+      - name: Analyze daemons
         run: |
           for DAEMON in amfid installd trustd; do
             if [ -f "$DAEMON" ]; then
               echo "=== 分析 $DAEMON ==="
               file "$DAEMON"
-              
-              # 符号表
               nm -C -a "$DAEMON" > analysis/symbols/${DAEMON}_symbols.txt 2>&1 || true
-              
-              # 导出函数
               nm -gU "$DAEMON" > analysis/symbols/${DAEMON}_exports.txt 2>&1 || true
-              
-              # 字符串（代码签名相关）
-              strings "$DAEMON" | grep -iE "(coretrust|trustcache|codesign|signature|entitlement|cdhash|CMS|PKCS)" | sort -u > analysis/signatures/${DAEMON}_sig_strings.txt 2>&1
-              
-              # 所有字符串
-              strings -n 8 "$DAEMON" | sort -u > analysis/strings/${DAEMON}_strings.txt 2>&1
-              
-              # class-dump
+              strings "$DAEMON" | grep -iE "(coretrust|trustcache|codesign|signature|entitlement|cdhash|CMS|PKCS)" | sort -u > analysis/signatures/${DAEMON}_sig_strings.txt 2>&1 || true
+              strings -n 8 "$DAEMON" | sort -u > analysis/strings/${DAEMON}_strings.txt 2>&1 || true
               if which class-dump > /dev/null 2>&1; then
                 class-dump -H -o analysis/amfi/${DAEMON}_headers "$DAEMON" 2>&1 || true
               fi
-              
-              # radare2 反汇编 main 函数
               r2 -q -c 'aaa; s main; pdf' "$DAEMON" > analysis/disasm/${DAEMON}_main.txt 2>&1 || true
-              
-              # 关键函数（签名验证相关）
               for FUNC in $(nm "$DAEMON" 2>/dev/null | grep -iE "(trust|verify|validate|sign|check)" | awk '{print $3}'); do
                 r2 -q -c "aaa; s sym.$FUNC; pdf" "$DAEMON" >> analysis/disasm/${DAEMON}_trust_functions.txt 2>&1 || true
               done
             fi
           done
 
-      - name: Analyze Frameworks (Security & AppleMobileFileIntegrity)
+      - name: Analyze Frameworks
         run: |
-          # Security.framework
           SEC_BIN=$(find extracted_frameworks -type f -name "Security" 2>/dev/null | head -1)
           if [ -n "$SEC_BIN" ]; then
             echo "=== 分析 Security.framework: $SEC_BIN ==="
             file "$SEC_BIN"
-            
-            # 搜索代码签名相关字符串
-            strings "$SEC_BIN" | grep -iE "(coretrust|trustcache|codesign|signature|entitlement|cdhash|CMS|PKCS|verify|validate)" | sort -u > analysis/signatures/security_sig_strings.txt 2>&1
-            
-            # 导出函数
-            nm -gU "$SEC_BIN" | grep -iE "(trust|verify|validate|sign|check)" > analysis/signatures/security_trust_exports.txt 2>&1
-            
-            # class-dump
+            strings "$SEC_BIN" | grep -iE "(coretrust|trustcache|codesign|signature|entitlement|cdhash|CMS|PKCS|verify|validate)" | sort -u > analysis/signatures/security_sig_strings.txt 2>&1 || true
+            nm -gU "$SEC_BIN" | grep -iE "(trust|verify|validate|sign|check)" > analysis/signatures/security_trust_exports.txt 2>&1 || true
             if which class-dump > /dev/null 2>&1; then
               class-dump -H -o analysis/amfi/security_headers "$SEC_BIN" 2>&1 || true
             fi
-            
-            # SecCode 相关函数反汇编
             for FUNC in $(nm -gU "$SEC_BIN" 2>/dev/null | grep -iE "SecCode" | awk '{print $3}' | head -20); do
               r2 -q -c "aaa; s sym.$FUNC; pdf" "$SEC_BIN" >> analysis/disasm/security_seccode.txt 2>&1 || true
             done
-            
-            # SecTrust 相关
             for FUNC in $(nm -gU "$SEC_BIN" 2>/dev/null | grep -iE "SecTrust" | awk '{print $3}' | head -20); do
               r2 -q -c "aaa; s sym.$FUNC; pdf" "$SEC_BIN" >> analysis/disasm/security_sectrust.txt 2>&1 || true
             done
-          else
-            echo "未找到 Security 二进制"
           fi
           
-          # AppleMobileFileIntegrity.framework
           AMFI_BIN=$(find extracted_frameworks -type f -name "AppleMobileFileIntegrity" 2>/dev/null | head -1)
           if [ -n "$AMFI_BIN" ]; then
             echo "=== 分析 AppleMobileFileIntegrity.framework: $AMFI_BIN ==="
             file "$AMFI_BIN"
-            
-            strings "$AMFI_BIN" | grep -iE "(coretrust|trustcache|codesign|signature|entitlement|cdhash|verify|validate)" | sort -u > analysis/signatures/amfi_sig_strings.txt 2>&1
-            
-            nm -gU "$AMFI_BIN" | grep -iE "(trust|verify|validate|sign|check)" > analysis/signatures/amfi_trust_exports.txt 2>&1
-            
+            strings "$AMFI_BIN" | grep -iE "(coretrust|trustcache|codesign|signature|entitlement|cdhash|verify|validate)" | sort -u > analysis/signatures/amfi_sig_strings.txt 2>&1 || true
+            nm -gU "$AMFI_BIN" | grep -iE "(trust|verify|validate|sign|check)" > analysis/signatures/amfi_trust_exports.txt 2>&1 || true
             if which class-dump > /dev/null 2>&1; then
               class-dump -H -o analysis/amfi/amfi_headers "$AMFI_BIN" 2>&1 || true
             fi
-            
             for FUNC in $(nm -gU "$AMFI_BIN" 2>/dev/null | grep -iE "(verify|validate|trust|check)" | awk '{print $3}' | head -20); do
               r2 -q -c "aaa; s sym.$FUNC; pdf" "$AMFI_BIN" >> analysis/disasm/amfi_verify_functions.txt 2>&1 || true
             done
-          else
-            echo "未找到 AppleMobileFileIntegrity 二进制"
           fi
 
-      - name: Analyze SpringBoard (if available)
+      - name: Analyze SpringBoard
         run: |
           SPRINGBOARD=$(find . -name "SpringBoard" -type f ! -name "*.txt" ! -name "*.md" 2>/dev/null | head -1)
           if [ -n "$SPRINGBOARD" ]; then
             echo "=== 分析 SpringBoard: $SPRINGBOARD ==="
             file "$SPRINGBOARD"
-            
-            # 代码签名验证相关
-            strings "$SPRINGBOARD" | grep -iE "(codesign|signature|entitlement|provision|cdhash|verify|trust)" | sort -u > analysis/springboard/signature_strings.txt 2>&1
-            
-            # 应用安装验证
-            strings "$SPRINGBOARD" | grep -iE "(install|bundle|provision|certificate)" | sort -u > analysis/springboard/install_strings.txt 2>&1
-            
-            # class-dump
+            strings "$SPRINGBOARD" | grep -iE "(codesign|signature|entitlement|provision|cdhash|verify|trust)" | sort -u > analysis/springboard/signature_strings.txt 2>&1 || true
+            strings "$SPRINGBOARD" | grep -iE "(install|bundle|provision|certificate)" | sort -u > analysis/springboard/install_strings.txt 2>&1 || true
             if which class-dump > /dev/null 2>&1; then
               class-dump -H -o analysis/springboard/headers "$SPRINGBOARD" 2>&1 || true
-            fi
-            
-            # 签名验证相关方法
-            if which class-dump > /dev/null 2>&1; then
               class-dump "$SPRINGBOARD" 2>/dev/null | grep -iE "(sign|verify|trust|entitlement)" > analysis/springboard/signature_methods.txt 2>&1 || true
             fi
           else
             echo "未找到 SpringBoard"
           fi
 
-      - name: Ghidra headless analysis of kernelcache
+      - name: Ghidra headless analysis
         if: env.KERNEL_TARGET != ''
         run: |
           if [ -n "$KERNEL_TARGET" ] && [ -f "$KERNEL_TARGET" ] && [ -n "$GHIDRA_HOME" ]; then
             echo "=== Ghidra 分析 kernelcache ==="
             GHIDRA_HEADLESS="$GHIDRA_HOME/support/analyzeHeadless"
-            
             if [ -f "$GHIDRA_HEADLESS" ]; then
               PROJECT_DIR="analysis/coretrust/ghidra_project"
               mkdir -p "$PROJECT_DIR"
-              
-              "$GHIDRA_HEADLESS" "$PROJECT_DIR" "kernelcache" \
-                -import "$KERNEL_TARGET" \
-                -postScript "AutoAnalysis.java" 2>&1 || true
-              
-              echo "Ghidra 项目已创建: $PROJECT_DIR"
+              "$GHIDRA_HEADLESS" "$PROJECT_DIR" "kernelcache" -import "$KERNEL_TARGET" -postScript "AutoAnalysis.java" 2>&1 || true
+              echo "Ghidra 项目已创建"
             fi
           fi
 
-      - name: Generate CoreTrust analysis report
+      - name: Generate report
         run: |
-          cat > analysis/reports/coretrust_analysis.md << 'EOF'
-# CoreTrust & Code Signing Analysis Report
+          echo "# CoreTrust & Code Signing Analysis Report" > analysis/reports/coretrust_analysis.md
+          echo "" >> analysis/reports/coretrust_analysis.md
+          echo "## iOS 18.7.6 CoreTrust Architecture" >> analysis/reports/coretrust_analysis.md
+          echo "" >> analysis/reports/coretrust_analysis.md
+          echo "### 代码签名验证链" >> analysis/reports/coretrust_analysis.md
+          echo '```' >> analysis/reports/coretrust_analysis.md
+          echo "App -> CMS Signature -> CDHash -> TrustCache -> CoreTrust (Kernel)" >> analysis/reports/coretrust_analysis.md
+          echo "  -> Security.framework (SecCode/SecTrust)" >> analysis/reports/coretrust_analysis.md
+          echo "  -> amfid (Userspace Daemon)" >> analysis/reports/coretrust_analysis.md
+          echo "  -> AppleMobileFileIntegrity (AMFI Kext)" >> analysis/reports/coretrust_analysis.md
+          echo "  -> CoreTrust (Kernel Engine)" >> analysis/reports/coretrust_analysis.md
+          echo '```' >> analysis/reports/coretrust_analysis.md
+          echo "" >> analysis/reports/coretrust_analysis.md
+          echo "### 分析文件统计" >> analysis/reports/coretrust_analysis.md
+          for BIN in amfid installd trustd; do
+            if [ -f "$BIN" ]; then
+              echo "- **$BIN**: $(file $BIN | cut -d: -f2-)" >> analysis/reports/coretrust_analysis.md
+              echo "  - 导出函数: $(nm -gU $BIN 2>/dev/null | wc -l)" >> analysis/reports/coretrust_analysis.md
+            fi
+          done
 
-## iOS 18.7.6 CoreTrust Architecture
-
-### CoreTrust 组件位置
-- **内核空间**: kernelcache (AppleImage4 + AMFI 内核扩展)
-- **用户空间守护进程**: amfid, installd, trustd
-- **框架**: Security.framework, AppleMobileFileIntegrity.framework
-
-### 代码签名验证链
+      - name: Upload analysis results
+        uses: actions/upload-artifact@v4
+        with:
+          name: coretrust_analysis
+          path: analysis/
+          retention-days: 90
