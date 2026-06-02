@@ -30,39 +30,52 @@ jobs:
           brew install radare2
           brew install binutils
           
-          # 从源码编译 class-dump
-          echo "编译 class-dump..."
-          git clone https://github.com/nygard/class-dump.git
-          cd class-dump
-          make
-          sudo cp class-dump /usr/local/bin/
-          cd ..
+          # 下载预编译的 class-dump
+          echo "下载 class-dump..."
+          sudo curl -L -o /usr/local/bin/class-dump https://github.com/AloneMonkey/MonkeyDev/raw/master/bin/class-dump
+          sudo chmod +x /usr/local/bin/class-dump
+          
+          # 安装 Ghidra
+          echo "安装 Ghidra..."
+          brew install --cask ghidra
+          
+          # 设置 Ghidra 路径
+          GHIDRA_HOME=$(find /Applications -name "ghidra_*" -type d | head -1)
+          if [ -n "$GHIDRA_HOME" ]; then
+            echo "GHIDRA_HOME=$GHIDRA_HOME" >> $GITHUB_ENV
+            echo "Ghidra 安装成功: $GHIDRA_HOME"
+          else
+            echo "Ghidra 安装失败，尝试直接下载..."
+            curl -L -o ghidra.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.0.3_build/ghidra_11.0.3_PUBLIC_20240410.zip
+            unzip -q ghidra.zip -d ghidra_install
+            echo "GHIDRA_HOME=$(pwd)/ghidra_install/ghidra_11.0.3_PUBLIC" >> $GITHUB_ENV
+          fi
           
           # 验证安装
-          which class-dump && class-dump --version || echo "class-dump 安装失败"
+          which class-dump && file /usr/local/bin/class-dump || echo "class-dump 安装失败"
+          echo "工具安装完成"
 
       - name: Create output directories
         run: |
-          mkdir -p analysis/{symbols,strings,classes,disasm,decompiled}
+          mkdir -p analysis/{symbols,strings,classes,disasm,decompiled,ghidra}
 
       - name: Analyze amfid
         run: |
           echo "=== 深度分析 amfid ==="
           if [ -f amfid ]; then
             file amfid
-            nm -C -a amfid > analysis/symbols/amfid_symbols.txt 2>&1
-            strings -n 8 amfid | sort -u > analysis/strings/amfid_strings.txt 2>&1
-            nm -gU amfid > analysis/symbols/amfid_exports.txt 2>&1
+            nm -C -a amfid > analysis/symbols/amfid_symbols.txt 2>&1 || true
+            strings -n 8 amfid | sort -u > analysis/strings/amfid_strings.txt 2>&1 || true
+            nm -gU amfid > analysis/symbols/amfid_exports.txt 2>&1 || true
             
-            # class-dump 分析
             if which class-dump > /dev/null 2>&1; then
-              class-dump -H -o analysis/classes/amfid_headers amfid 2>&1
+              class-dump -H -o analysis/classes/amfid_headers amfid 2>&1 || true
             fi
             
-            r2 -q -c 'aaa; aac; aaft; s main; pdf' amfid > analysis/disasm/amfid_main.txt 2>&1
-            r2 -q -c 'aaa; afl' amfid > analysis/disasm/amfid_functions.txt 2>&1
-            r2 -q -c 'aaa; axt main' amfid > analysis/disasm/amfid_xrefs.txt 2>&1
-            r2 -q -c 'aaa; aac; pdc @ main' amfid > analysis/decompiled/amfid_main.c 2>&1
+            r2 -q -c 'aaa; aac; aaft; s main; pdf' amfid > analysis/disasm/amfid_main.txt 2>&1 || true
+            r2 -q -c 'aaa; afl' amfid > analysis/disasm/amfid_functions.txt 2>&1 || true
+            r2 -q -c 'aaa; axt main' amfid > analysis/disasm/amfid_xrefs.txt 2>&1 || true
+            r2 -q -c 'aaa; aac; pdc @ main' amfid > analysis/decompiled/amfid_main.c 2>&1 || true
           else
             echo "amfid 文件不存在"
           fi
@@ -72,18 +85,18 @@ jobs:
           echo "=== 深度分析 installd ==="
           if [ -f installd ]; then
             file installd
-            nm -C -a installd > analysis/symbols/installd_symbols.txt 2>&1
-            strings -n 8 installd | sort -u > analysis/strings/installd_strings.txt 2>&1
-            nm -gU installd > analysis/symbols/installd_exports.txt 2>&1
+            nm -C -a installd > analysis/symbols/installd_symbols.txt 2>&1 || true
+            strings -n 8 installd | sort -u > analysis/strings/installd_strings.txt 2>&1 || true
+            nm -gU installd > analysis/symbols/installd_exports.txt 2>&1 || true
             
             if which class-dump > /dev/null 2>&1; then
-              class-dump -H -o analysis/classes/installd_headers installd 2>&1
+              class-dump -H -o analysis/classes/installd_headers installd 2>&1 || true
             fi
             
-            r2 -q -c 'aaa; aac; aaft; s main; pdf' installd > analysis/disasm/installd_main.txt 2>&1
-            r2 -q -c 'aaa; afl' installd > analysis/disasm/installd_functions.txt 2>&1
-            r2 -q -c 'aaa; axt main' installd > analysis/disasm/installd_xrefs.txt 2>&1
-            r2 -q -c 'aaa; aac; pdc @ main' installd > analysis/decompiled/installd_main.c 2>&1
+            r2 -q -c 'aaa; aac; aaft; s main; pdf' installd > analysis/disasm/installd_main.txt 2>&1 || true
+            r2 -q -c 'aaa; afl' installd > analysis/disasm/installd_functions.txt 2>&1 || true
+            r2 -q -c 'aaa; axt main' installd > analysis/disasm/installd_xrefs.txt 2>&1 || true
+            r2 -q -c 'aaa; aac; pdc @ main' installd > analysis/decompiled/installd_main.c 2>&1 || true
           else
             echo "installd 文件不存在"
           fi
@@ -93,18 +106,18 @@ jobs:
           echo "=== 深度分析 trustd ==="
           if [ -f trustd ]; then
             file trustd
-            nm -C -a trustd > analysis/symbols/trustd_symbols.txt 2>&1
-            strings -n 8 trustd | sort -u > analysis/strings/trustd_strings.txt 2>&1
-            nm -gU trustd > analysis/symbols/trustd_exports.txt 2>&1
+            nm -C -a trustd > analysis/symbols/trustd_symbols.txt 2>&1 || true
+            strings -n 8 trustd | sort -u > analysis/strings/trustd_strings.txt 2>&1 || true
+            nm -gU trustd > analysis/symbols/trustd_exports.txt 2>&1 || true
             
             if which class-dump > /dev/null 2>&1; then
-              class-dump -H -o analysis/classes/trustd_headers trustd 2>&1
+              class-dump -H -o analysis/classes/trustd_headers trustd 2>&1 || true
             fi
             
-            r2 -q -c 'aaa; aac; aaft; s main; pdf' trustd > analysis/disasm/trustd_main.txt 2>&1
-            r2 -q -c 'aaa; afl' trustd > analysis/disasm/trustd_functions.txt 2>&1
-            r2 -q -c 'aaa; axt main' trustd > analysis/disasm/trustd_xrefs.txt 2>&1
-            r2 -q -c 'aaa; aac; pdc @ main' trustd > analysis/decompiled/trustd_main.c 2>&1
+            r2 -q -c 'aaa; aac; aaft; s main; pdf' trustd > analysis/disasm/trustd_main.txt 2>&1 || true
+            r2 -q -c 'aaa; afl' trustd > analysis/disasm/trustd_functions.txt 2>&1 || true
+            r2 -q -c 'aaa; axt main' trustd > analysis/disasm/trustd_xrefs.txt 2>&1 || true
+            r2 -q -c 'aaa; aac; pdc @ main' trustd > analysis/decompiled/trustd_main.c 2>&1 || true
           else
             echo "trustd 文件不存在"
           fi
@@ -116,17 +129,17 @@ jobs:
           if [ -n "$FRAMEWORK_BIN" ]; then
             echo "找到: $FRAMEWORK_BIN"
             file "$FRAMEWORK_BIN"
-            nm -C -a "$FRAMEWORK_BIN" > analysis/symbols/security_symbols.txt 2>&1
-            strings -n 8 "$FRAMEWORK_BIN" | sort -u > analysis/strings/security_strings.txt 2>&1
-            nm -gU "$FRAMEWORK_BIN" > analysis/symbols/security_exports.txt 2>&1
+            nm -C -a "$FRAMEWORK_BIN" > analysis/symbols/security_symbols.txt 2>&1 || true
+            strings -n 8 "$FRAMEWORK_BIN" | sort -u > analysis/strings/security_strings.txt 2>&1 || true
+            nm -gU "$FRAMEWORK_BIN" > analysis/symbols/security_exports.txt 2>&1 || true
             
             if which class-dump > /dev/null 2>&1; then
-              class-dump -H -o analysis/classes/security_headers "$FRAMEWORK_BIN" 2>&1
+              class-dump -H -o analysis/classes/security_headers "$FRAMEWORK_BIN" 2>&1 || true
             fi
             
-            r2 -q -c 'aaa; afl' "$FRAMEWORK_BIN" > analysis/disasm/security_functions.txt 2>&1
+            r2 -q -c 'aaa; afl' "$FRAMEWORK_BIN" > analysis/disasm/security_functions.txt 2>&1 || true
             for FUNC in $(nm -gU "$FRAMEWORK_BIN" | awk '{print $3}' | head -20); do
-              r2 -q -c "aaa; s sym.$FUNC; pdf" "$FRAMEWORK_BIN" >> analysis/disasm/security_key_functions.txt 2>&1
+              r2 -q -c "aaa; s sym.$FUNC; pdf" "$FRAMEWORK_BIN" >> analysis/disasm/security_key_functions.txt 2>&1 || true
             done
           else
             echo "未找到 Security 二进制文件"
@@ -139,20 +152,77 @@ jobs:
           if [ -n "$FRAMEWORK_BIN" ]; then
             echo "找到: $FRAMEWORK_BIN"
             file "$FRAMEWORK_BIN"
-            nm -C -a "$FRAMEWORK_BIN" > analysis/symbols/amfi_symbols.txt 2>&1
-            strings -n 8 "$FRAMEWORK_BIN" | sort -u > analysis/strings/amfi_strings.txt 2>&1
-            nm -gU "$FRAMEWORK_BIN" > analysis/symbols/amfi_exports.txt 2>&1
+            nm -C -a "$FRAMEWORK_BIN" > analysis/symbols/amfi_symbols.txt 2>&1 || true
+            strings -n 8 "$FRAMEWORK_BIN" | sort -u > analysis/strings/amfi_strings.txt 2>&1 || true
+            nm -gU "$FRAMEWORK_BIN" > analysis/symbols/amfi_exports.txt 2>&1 || true
             
             if which class-dump > /dev/null 2>&1; then
-              class-dump -H -o analysis/classes/amfi_headers "$FRAMEWORK_BIN" 2>&1
+              class-dump -H -o analysis/classes/amfi_headers "$FRAMEWORK_BIN" 2>&1 || true
             fi
             
-            r2 -q -c 'aaa; afl' "$FRAMEWORK_BIN" > analysis/disasm/amfi_functions.txt 2>&1
+            r2 -q -c 'aaa; afl' "$FRAMEWORK_BIN" > analysis/disasm/amfi_functions.txt 2>&1 || true
             for FUNC in $(nm -gU "$FRAMEWORK_BIN" | awk '{print $3}' | head -20); do
-              r2 -q -c "aaa; s sym.$FUNC; pdf" "$FRAMEWORK_BIN" >> analysis/disasm/amfi_key_functions.txt 2>&1
+              r2 -q -c "aaa; s sym.$FUNC; pdf" "$FRAMEWORK_BIN" >> analysis/disasm/amfi_key_functions.txt 2>&1 || true
             done
           else
             echo "未找到 AppleMobileFileIntegrity 二进制文件"
+          fi
+
+      - name: Analyze kernelcache with Ghidra
+        run: |
+          echo "=== Ghidra 分析 kernelcache ==="
+          KERNELCACHE=$(find . -name "kernelcache*" -type f ! -name "*.txt" 2>/dev/null | head -1)
+          
+          if [ -n "$KERNELCACHE" ]; then
+            echo "找到 kernelcache: $KERNELCACHE"
+            file "$KERNELCACHE"
+            
+            # 先解压如果 lzfse 压缩
+            if file "$KERNELCACHE" | grep -q "lzfse"; then
+              echo "kernelcache 是 lzfse 压缩，正在解压..."
+              brew install lzfse
+              lzfse -decode -i "$KERNELCACHE" -o kernelcache.decompressed
+              KERNEL_TARGET="kernelcache.decompressed"
+            else
+              KERNEL_TARGET="$KERNELCACHE"
+            fi
+            
+            # 创建 Ghidra 项目
+            echo "创建 Ghidra 项目..."
+            GHIDRA_HEADLESS="$GHIDRA_HOME/support/analyzeHeadless"
+            
+            if [ -f "$GHIDRA_HEADLESS" ]; then
+              PROJECT_DIR="analysis/ghidra/kernelcache_project"
+              mkdir -p "$PROJECT_DIR"
+              
+              # Ghidra 无头分析
+              "$GHIDRA_HEADLESS" "$PROJECT_DIR" "kernelcache" \
+                -import "$KERNEL_TARGET" \
+                -postScript "AutoAnalysis.java" \
+                -scriptPath "$GHIDRA_HOME/Ghidra/Features/Base/ghidra_scripts" \
+                -script "ExportFunctions.java" "analysis/ghidra/kernelcache_functions.txt" 2>&1 || true
+              
+              # 导出字符串
+              "$GHIDRA_HEADLESS" "$PROJECT_DIR" "kernelcache" \
+                -process "$KERNEL_TARGET" \
+                -script "ExportStrings.java" "analysis/ghidra/kernelcache_strings.txt" 2>&1 || true
+              
+              echo "Ghidra 分析完成"
+            else
+              echo "Ghidra headless 不可用"
+              
+              # 回退到 radare2 深度分析
+              echo "使用 radare2 深度分析 kernelcache..."
+              r2 -q -c 'aaa; afl' "$KERNEL_TARGET" > analysis/disasm/kernelcache_functions.txt 2>&1 || true
+              
+              # 提取内核扩展列表
+              strings "$KERNEL_TARGET" | grep -i "com.apple" | sort -u > analysis/strings/kernelcache_kexts.txt 2>&1 || true
+              
+              # 搜索安全相关字符串
+              strings "$KERNEL_TARGET" | grep -iE "(sandbox|mac_|amfi|trust)" | sort -u > analysis/strings/kernelcache_security.txt 2>&1 || true
+            fi
+          else
+            echo "未找到 kernelcache 文件"
           fi
 
       - name: Generate analysis report
@@ -170,6 +240,16 @@ jobs:
               echo "" >> analysis/REPORT.md
             fi
           done
+          
+          # 添加内核分析报告
+          KERNELCACHE=$(find . -name "kernelcache*" -type f ! -name "*.txt" 2>/dev/null | head -1)
+          if [ -n "$KERNELCACHE" ]; then
+            echo "### Kernelcache" >> analysis/REPORT.md
+            echo "- 文件: $(basename $KERNELCACHE)" >> analysis/REPORT.md
+            echo "- 大小: $(ls -lh $KERNELCACHE | awk '{print $5}')" >> analysis/REPORT.md
+            echo "- 类型: $(file $KERNELCACHE | cut -d: -f2-)" >> analysis/REPORT.md
+            echo "" >> analysis/REPORT.md
+          fi
 
       - name: Upload analysis results
         uses: actions/upload-artifact@v4
