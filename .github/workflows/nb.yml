@@ -31,10 +31,6 @@ jobs:
           unzip -q ghidra.zip -d ghidra_install
           GHIDRA_HOME=$(find ghidra_install -name "ghidra_*" -type d -maxdepth 1 | head -1)
           echo "GHIDRA_HOME=$(pwd)/$GHIDRA_HOME" >> $GITHUB_ENV
-          curl -L -o jtool2.tar.gz https://github.com/paradiseduo/jtool2/releases/download/v2.0/jtool2_2.0.tar.gz
-          tar -xzf jtool2.tar.gz
-          sudo cp jtool2 /usr/local/bin/
-          sudo chmod +x /usr/local/bin/jtool2
           brew tap blacktop/tap
           brew install ipsw
 
@@ -61,7 +57,6 @@ jobs:
             otool -hv "$KERNEL_TARGET" | head -20
             otool -l "$KERNEL_TARGET" | grep -A5 "LC_SEGMENT_64" | grep -E "(segname|vmaddr)" | head -20
             ipsw kernel kexts "$KERNEL_TARGET" -o analysis/kexts/ 2>&1 || true
-            jtool2 -l "$KERNEL_TARGET" > analysis/addresses/kernel_segments.txt 2>&1 || true
             nm -a "$KERNEL_TARGET" 2>/dev/null > analysis/symbols/kernel_symbols.txt || true
             strings -t x "$KERNEL_TARGET" | grep -i "coretrust" > analysis/addresses/coretrust_string_offsets.txt 2>&1 || true
             strings -t x "$KERNEL_TARGET" | grep -i "trustcache" > analysis/addresses/trustcache_string_offsets.txt 2>&1 || true
@@ -78,7 +73,6 @@ jobs:
             strings "$KERNEL_TARGET" | grep -iE "(IMG4|IM4P)" | sort -u > analysis/coretrust/img4_strings.txt 2>&1 || true
             strings "$KERNEL_TARGET" | grep -iE "(AMFI|AppleMobileFileIntegrity)" | sort -u > analysis/coretrust/amfi_strings.txt 2>&1 || true
             strings "$KERNEL_TARGET" | grep -iE "(codesign|entitlement|provision)" | sort -u > analysis/coretrust/codesign_strings.txt 2>&1 || true
-            strings "$KERNEL_TARGET" | grep -iE "(cdhash|CDHash)" | sort -u > analysis/coretrust/cdhash_strings.txt 2>&1 || true
           fi
 
       - name: Analyze daemons with addresses
@@ -87,9 +81,8 @@ jobs:
             if [ -f "$DAEMON" ]; then
               echo "=== Analyzing $DAEMON ==="
               otool -hv "$DAEMON" > analysis/addresses/${DAEMON}_mach_header.txt 2>&1 || true
-              otool -l "$DAEMON" | grep -A5 "LC_SEGMENT_64" > analysis/addresses/${DAEMON}_segments.txt 2>&1 || true
-              jtool2 -l "$DAEMON" > analysis/addresses/${DAEMON}_load_commands.txt 2>&1 || true
-              jtool2 --sig "$DAEMON" > analysis/signatures/${DAEMON}_code_sig.txt 2>&1 || true
+              otool -l "$DAEMON" > analysis/addresses/${DAEMON}_load_commands.txt 2>&1 || true
+              otool -L "$DAEMON" > analysis/addresses/${DAEMON}_dylibs.txt 2>&1 || true
               nm -C -a "$DAEMON" > analysis/symbols/${DAEMON}_symbols.txt 2>&1 || true
               nm -gU "$DAEMON" > analysis/symbols/${DAEMON}_exports.txt 2>&1 || true
               strings -n 8 "$DAEMON" | sort -u > analysis/strings/${DAEMON}_strings.txt 2>&1 || true
@@ -118,9 +111,8 @@ jobs:
               FW_SHORT=$(echo "$FW_NAME" | tr '[:upper:]' '[:lower:]')
               echo "=== Analyzing $FW_NAME ==="
               otool -hv "$FW_BIN" > analysis/addresses/${FW_SHORT}_mach_header.txt 2>&1 || true
-              otool -l "$FW_BIN" | grep -A5 "LC_SEGMENT_64" > analysis/addresses/${FW_SHORT}_segments.txt 2>&1 || true
-              jtool2 -l "$FW_BIN" > analysis/addresses/${FW_SHORT}_load_commands.txt 2>&1 || true
-              jtool2 --sig "$FW_BIN" > analysis/signatures/${FW_SHORT}_code_sig.txt 2>&1 || true
+              otool -l "$FW_BIN" > analysis/addresses/${FW_SHORT}_load_commands.txt 2>&1 || true
+              otool -L "$FW_BIN" > analysis/addresses/${FW_SHORT}_dylibs.txt 2>&1 || true
               nm -C -a "$FW_BIN" > analysis/symbols/${FW_SHORT}_symbols.txt 2>&1 || true
               nm -gU "$FW_BIN" > analysis/symbols/${FW_SHORT}_exports.txt 2>&1 || true
               nm -gU "$FW_BIN" | grep -iE "(trust|verify|validate|sign|check|code)" > analysis/signatures/${FW_SHORT}_trust_exports.txt 2>&1 || true
@@ -143,8 +135,7 @@ jobs:
           if [ -n "$SPRINGBOARD" ]; then
             echo "=== Analyzing SpringBoard ==="
             otool -hv "$SPRINGBOARD" > analysis/addresses/springboard_mach_header.txt 2>&1 || true
-            jtool2 -l "$SPRINGBOARD" > analysis/addresses/springboard_load_commands.txt 2>&1 || true
-            jtool2 --sig "$SPRINGBOARD" > analysis/signatures/springboard_code_sig.txt 2>&1 || true
+            otool -l "$SPRINGBOARD" > analysis/addresses/springboard_load_commands.txt 2>&1 || true
             strings "$SPRINGBOARD" | grep -iE "(codesign|signature|entitlement|provision|cdhash|verify|trust)" | sort -u > analysis/springboard/signature_strings.txt 2>&1 || true
             if which class-dump > /dev/null 2>&1; then
               class-dump -H -o analysis/springboard/headers "$SPRINGBOARD" 2>&1 || true
