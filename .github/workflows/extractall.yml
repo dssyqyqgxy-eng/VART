@@ -35,20 +35,21 @@ jobs:
           sudo curl -L -o /usr/local/bin/class-dump https://github.com/AloneMonkey/MonkeyDev/raw/master/bin/class-dump
           sudo chmod +x /usr/local/bin/class-dump
           
-          # 安装 Ghidra
-          echo "安装 Ghidra..."
-          brew install --cask ghidra
+          # 直接下载 Ghidra
+          echo "下载 Ghidra..."
+          GHIDRA_VERSION="11.0.3"
+          GHIDRA_BUILD="20240410"
+          GHIDRA_URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_BUILD}.zip"
           
-          # 设置 Ghidra 路径
-          GHIDRA_HOME=$(find /Applications -name "ghidra_*" -type d | head -1)
+          curl -L -o ghidra.zip "$GHIDRA_URL"
+          unzip -q ghidra.zip -d ghidra_install
+          
+          GHIDRA_HOME=$(find ghidra_install -name "ghidra_*" -type d -maxdepth 1 | head -1)
           if [ -n "$GHIDRA_HOME" ]; then
-            echo "GHIDRA_HOME=$GHIDRA_HOME" >> $GITHUB_ENV
+            echo "GHIDRA_HOME=$(pwd)/$GHIDRA_HOME" >> $GITHUB_ENV
             echo "Ghidra 安装成功: $GHIDRA_HOME"
           else
-            echo "Ghidra 安装失败，尝试直接下载..."
-            curl -L -o ghidra.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.0.3_build/ghidra_11.0.3_PUBLIC_20240410.zip
-            unzip -q ghidra.zip -d ghidra_install
-            echo "GHIDRA_HOME=$(pwd)/ghidra_install/ghidra_11.0.3_PUBLIC" >> $GITHUB_ENV
+            echo "Ghidra 安装失败"
           fi
           
           # 验证安装
@@ -198,27 +199,15 @@ jobs:
               # Ghidra 无头分析
               "$GHIDRA_HEADLESS" "$PROJECT_DIR" "kernelcache" \
                 -import "$KERNEL_TARGET" \
-                -postScript "AutoAnalysis.java" \
-                -scriptPath "$GHIDRA_HOME/Ghidra/Features/Base/ghidra_scripts" \
-                -script "ExportFunctions.java" "analysis/ghidra/kernelcache_functions.txt" 2>&1 || true
-              
-              # 导出字符串
-              "$GHIDRA_HEADLESS" "$PROJECT_DIR" "kernelcache" \
-                -process "$KERNEL_TARGET" \
-                -script "ExportStrings.java" "analysis/ghidra/kernelcache_strings.txt" 2>&1 || true
+                -postScript "AutoAnalysis.java" 2>&1 || true
               
               echo "Ghidra 分析完成"
             else
-              echo "Ghidra headless 不可用"
+              echo "Ghidra headless 不可用，使用 radare2 分析"
               
-              # 回退到 radare2 深度分析
-              echo "使用 radare2 深度分析 kernelcache..."
+              # radare2 深度分析
               r2 -q -c 'aaa; afl' "$KERNEL_TARGET" > analysis/disasm/kernelcache_functions.txt 2>&1 || true
-              
-              # 提取内核扩展列表
               strings "$KERNEL_TARGET" | grep -i "com.apple" | sort -u > analysis/strings/kernelcache_kexts.txt 2>&1 || true
-              
-              # 搜索安全相关字符串
               strings "$KERNEL_TARGET" | grep -iE "(sandbox|mac_|amfi|trust)" | sort -u > analysis/strings/kernelcache_security.txt 2>&1 || true
             fi
           else
@@ -241,7 +230,6 @@ jobs:
             fi
           done
           
-          # 添加内核分析报告
           KERNELCACHE=$(find . -name "kernelcache*" -type f ! -name "*.txt" 2>/dev/null | head -1)
           if [ -n "$KERNELCACHE" ]; then
             echo "### Kernelcache" >> analysis/REPORT.md
