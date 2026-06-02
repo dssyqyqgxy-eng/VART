@@ -1,131 +1,27 @@
 #!/usr/bin/env python3
-"""Apple 高仿证书生成器 - 最终版（含内核扩展 OID）"""
-import datetime, os, sys, base64, zipfile, uuid
+"""漏洞测试证书生成 + Mac 本地一键验证"""
+import datetime, os, sys, subprocess, tempfile
 from cryptography import x509
-from cryptography.x509.oid import ObjectIdentifier, NameOID, ExtendedKeyUsageOID
+from cryptography.x509.oid import ObjectIdentifier, NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives.serialization import pkcs12
 
-TEAM_ID = sys.argv[1] if len(sys.argv) > 1 else "59GAB85EFG"
-OUTPUT_DIR = sys.argv[2] if len(sys.argv) > 2 else "./cert_output"
-CERT_PASS = "1"
-DAYS = 2912000
-
+OUTPUT_DIR = sys.argv[1] if len(sys.argv) > 1 else "./vuln_test_certs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ============================================================
-# CA 证书策略
-OID_ROOT_GENERIC  = ObjectIdentifier("1.2.840.113635.100.1.2")
-OID_ROOT_CODESIGN = ObjectIdentifier("1.2.840.113635.100.1.108")
-OID_ROOT_PRIVATE  = ObjectIdentifier("1.2.840.113635.100.1.115")
+# --- 测试专用 OID ---
+OID_UNKNOWN_CRITICAL = ObjectIdentifier("1.3.6.1.4.1.99999.1.1")
+OID_CUSTOM_POLICY    = ObjectIdentifier("1.3.6.1.4.1.99999.2.1")
+MALICIOUS_OCSP_URL   = "http://10.255.255.1/ocsp"
 
-# 叶子证书策略
-OID_POLICY_5_1      = ObjectIdentifier("1.2.840.113635.100.5.1")
-OID_APPLE_ISSUED_1  = ObjectIdentifier("1.2.840.113635.100.6.86")
-OID_APPLE_ISSUED_2  = ObjectIdentifier("1.2.840.113635.100.6.87")
-OID_PROD_MARK       = ObjectIdentifier("1.2.840.113635.100.6.27.11.1")
-OID_LEAF_MARK       = ObjectIdentifier("1.2.840.113635.100.6.27.18")
+RESULTS = []
 
-# 代码签名全平台 + 内核扩展 (6.1.7 和 6.1.4 已包含，不再单独添加)
-OID_1_x = [ObjectIdentifier(f"1.2.840.113635.100.6.1.{i}") for i in 
-           [1,2,3,4,5,6,7,8,9,10,14,21,22,25]]
+def gen_key_512():
+    return rsa.generate_private_key(65537, 512, default_backend())
 
-# IPA 签名核心
-OID_IPA_SIGNING = ObjectIdentifier("1.2.840.113635.100.6.1.13")
-
-# WWDR / 系统安全
-OID_WWDR     = ObjectIdentifier("1.2.840.113635.100.6.2.1")
-OID_INTEG    = ObjectIdentifier("1.2.840.113635.100.6.3.1")
-OID_SEC_BOOT = ObjectIdentifier("1.2.840.113635.100.6.3.2")
-
-def gen_key():
+def gen_key_2048():
     return rsa.generate_private_key(65537, 2048, default_backend())
-
-def build_cert(subject, issuer, issuer_key, subject_key, is_ca=False):
-    pub = subject_key.public_key()
-    builder = x509.CertificateBuilder()
-    builder = builder.subject_name(subject)
-    builder = builder.issuer_name(issuer)
-    builder = builder.serial_number(x509.random_serial_number())
-    builder = builder.not_valid_before(datetime.datetime.now(datetime.timezone.utc))
-    builder = builder.not_valid_after(
-        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=DAYS))
-    builder = builder.public_key(pub)
-
-    builder = builder.add_extension(
-        x509.BasicConstraints(ca=is_ca, path_length=None), critical=True)
-    builder = builder.add_extension(
-        x509.SubjectKeyIdentifier.from_public_key(pub), critical=False)
-    builder = builder.add_extension(
-        x509.AuthorityKeyIdentifier.from_issuer_public_key(
-            issuer_key.public_key()), critical=False)
-
-    if is_ca:
-        builder = builder.add_extension(
-            x509.KeyUsage(digital_signature=True, key_cert_sign=True,
-                          crl_sign=True, content_commitment=False,
-                          key_encipherment=False, data_encipherment=False,
-                          key_agreement=False, encipher_only=False,
-                          decipher_only=False), critical=True)
-        builder = builder.add_extension(
-            x509.CertificatePolicies([
-                x509.PolicyInformation(OID_ROOT_GENERIC, policy_qualifiers=None),
-                x509.PolicyInformation(OID_ROOT_CODESIGN, policy_qualifiers=None),
-                x509.PolicyInformation(OID_ROOT_PRIVATE, policy_qualifiers=None),
-            ]), critical=False)
-    else:
-        builder = builder.add_extension(
-            x509.KeyUsage(digital_signature=True, content_commitment=False,
-                          key_encipherment=False, data_encipherment=False,
-                          key_agreement=False, key_cert_sign=False,
-                          crl_sign=False, encipher_only=False,
-                          decipher_only=False), critical=True)
-        builder = builder.add_extension(
-            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CODE_SIGNING]), critical=True)
-        builder = builder.add_extension(
-            x509.CertificatePolicies([
-                x509.PolicyInformation(OID_POLICY_5_1, policy_qualifiers=[
-                    "https://www.apple.com/certificateauthority/"]),
-                x509.PolicyInformation(OID_ROOT_PRIVATE, policy_qualifiers=None),
-                x509.PolicyInformation(OID_APPLE_ISSUED_1, policy_qualifiers=None),
-                x509.PolicyInformation(OID_APPLE_ISSUED_2, policy_qualifiers=None),
-                x509.PolicyInformation(OID_PROD_MARK, policy_qualifiers=None),
-                x509.PolicyInformation(OID_LEAF_MARK, policy_qualifiers=None),
-            ]), critical=False)
-
-    builder = builder.add_extension(
-        x509.CRLDistributionPoints([
-            x509.DistributionPoint(
-                full_name=[x509.UniformResourceIdentifier("http://crl.apple.com/root.crl")],
-                relative_name=None, reasons=None, crl_issuer=None
-            )
-        ]), critical=False)
-    builder = builder.add_extension(
-        x509.AuthorityInformationAccess([
-            x509.AccessDescription(
-                x509.oid.AuthorityInformationAccessOID.OCSP,
-                x509.UniformResourceIdentifier("http://ocsp.apple.com/ocsp03-wwdr01")
-            )
-        ]), critical=False)
-    builder = builder.add_extension(
-        x509.SubjectAlternativeName([x509.RFC822Name("apple@apple.com")]), critical=False)
-
-    if not is_ca:
-        for oid in OID_1_x:
-            builder = builder.add_extension(
-                x509.UnrecognizedExtension(oid, b'\x05\x00'), critical=False)
-        builder = builder.add_extension(
-            x509.UnrecognizedExtension(OID_IPA_SIGNING, TEAM_ID.encode()), critical=False)
-        builder = builder.add_extension(
-            x509.UnrecognizedExtension(OID_WWDR, b'\x05\x00'), critical=False)
-        builder = builder.add_extension(
-            x509.UnrecognizedExtension(OID_INTEG, b'\x05\x00'), critical=False)
-        builder = builder.add_extension(
-            x509.UnrecognizedExtension(OID_SEC_BOOT, b'\x05\x00'), critical=False)
-
-    return builder.sign(issuer_key, hashes.SHA256(), default_backend())
 
 def write_key(path, key):
     with open(path, "wb") as f:
@@ -137,143 +33,211 @@ def write_cert(path, cert):
     with open(path, "wb") as f:
         f.write(cert.public_bytes(serialization.Encoding.PEM))
 
-# ============================================================
-print(">>> Root CA...")
-root_key = gen_key()
-root_subj = x509.Name([
-    x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
-    x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Apple Inc."),
-    x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Apple Certification Authority"),
-    x509.NameAttribute(NameOID.COMMON_NAME, "Apple Root CA"),
-])
-root_cert = build_cert(root_subj, root_subj, root_key, root_key, is_ca=True)
-write_key(f"{OUTPUT_DIR}/root_key.key", root_key)
-write_cert(f"{OUTPUT_DIR}/root_cert.crt", root_cert)
-print("✅ Root CA")
+def verify_with_security(cert_path, test_name):
+    """调用 macOS 的 security verify-cert 命令验证证书"""
+    print(f"\n🔍 验证: {test_name}")
+    try:
+        result = subprocess.run(
+            ["security", "verify-cert", "-c", cert_path],
+            capture_output=True, text=True, timeout=10
+        )
+        output = result.stdout + result.stderr
+        print(output)
 
-print(">>> 中间 CA...")
-codeca_key = gen_key()
-codeca_subj = x509.Name([
-    x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
-    x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Apple Inc."),
-    x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "G3"),
-    x509.NameAttribute(NameOID.COMMON_NAME, "Apple Worldwide Developer Relations Certification Authority"),
-])
-codeca_cert = build_cert(codeca_subj, root_subj, root_key, codeca_key, is_ca=True)
-write_key(f"{OUTPUT_DIR}/codeca_key.key", codeca_key)
-write_cert(f"{OUTPUT_DIR}/codeca_cert.crt", codeca_cert)
-print("✅ 中间 CA")
-
-print(">>> 签名证书...")
-dev_key = gen_key()
-dev_subj = x509.Name([
-    x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
-    x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Apple Inc."),
-    x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, TEAM_ID),
-    x509.NameAttribute(NameOID.COMMON_NAME, "Apple Development"),
-])
-dev_cert = build_cert(dev_subj, codeca_subj, codeca_key, dev_key, is_ca=False)
-write_key(f"{OUTPUT_DIR}/dev_key.key", dev_key)
-write_cert(f"{OUTPUT_DIR}/dev_cert.crt", dev_cert)
-print("✅ 签名证书")
+        # 判断结果
+        if "certificate verification successful" in output.lower():
+            RESULTS.append((test_name, "✅ 验证通过", output))
+        elif "CSSMERR" in output or "errSec" in output or "certificate is invalid" in output.lower():
+            RESULTS.append((test_name, "❌ 证书被拒绝", output))
+        else:
+            RESULTS.append((test_name, "⚠️  结果未知", output))
+    except subprocess.TimeoutExpired:
+        RESULTS.append((test_name, "⏰ 超时（可能是OCSP网络阻塞）", ""))
+    except Exception as e:
+        RESULTS.append((test_name, f"💥 执行错误: {e}", ""))
 
 # ============================================================
-print(">>> P12...")
-p12_full = pkcs12.serialize_key_and_certificates(
-    b"Apple Development", dev_key, dev_cert, [codeca_cert, root_cert],
-    serialization.BestAvailableEncryption(CERT_PASS.encode()))
-with open(f"{OUTPUT_DIR}/fullchain.p12", "wb") as f: f.write(p12_full)
-print("✅ P12")
+# 测试 1：畸形日期
+# ============================================================
+def test_malformed_date():
+    name = "畸形日期 (13月)"
+    print(f"\n>>> 生成: {name}")
+    key = gen_key_2048()
+    pub = key.public_key()
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test Malformed Date")])
+    
+    builder = x509.CertificateBuilder()
+    builder = builder.subject_name(subject).issuer_name(issuer)
+    builder = builder.serial_number(x509.random_serial_number())
+    builder = builder.public_key(pub)
+    builder = builder.not_valid_before(datetime.datetime(2020, 1, 1))
+    builder = builder.not_valid_after(datetime.datetime(2050, 12, 31))
+    builder = builder.add_extension(
+        x509.BasicConstraints(ca=False, path_length=None), critical=True)
+    builder = builder.add_extension(
+        x509.KeyUsage(digital_signature=True, content_commitment=False,
+                      key_encipherment=False, data_encipherment=False,
+                      key_agreement=False, key_cert_sign=False, crl_sign=False,
+                      encipher_only=False, decipher_only=False), critical=True)
+    
+    cert = builder.sign(key, hashes.SHA256(), default_backend())
+    der_data = cert.public_bytes(serialization.Encoding.DER)
+    # 把 12 月改成 13 月
+    der_data = der_data.replace(b'205012', b'205013')
+    
+    cert_path = os.path.join(OUTPUT_DIR, "test1_malformed_date.crt")
+    with open(cert_path, "wb") as f:
+        f.write(der_data)
+    
+    verify_with_security(cert_path, name)
 
 # ============================================================
-print(">>> 证书链 TXT...")
-def cert_text(cert, title):
-    pub = cert.public_key().public_bytes(
-        serialization.Encoding.PEM,
-        serialization.PublicFormat.SubjectPublicKeyInfo).decode()
-    txt = f"""============================================
-  {title}
-============================================
-Subject:      {cert.subject.rfc4514_string()}
-Issuer:       {cert.issuer.rfc4514_string()}
-Serial:       {cert.serial_number}
-Not Before:   {cert.not_valid_before_utc}
-Not After:    {cert.not_valid_after_utc}
-Fingerprint:  {cert.fingerprint(hashes.SHA256()).hex()}
-Public Key:
-{pub}
-Extensions:
-"""
-    for ext in cert.extensions:
-        txt += f"  {ext.oid._name or ext.oid.dotted_string}: {ext.value}\n"
-    return txt
-
-with open(f"{OUTPUT_DIR}/certificate_chain.txt", "w") as f:
-    f.write("Apple 高仿证书 — 完整证书链\n\n")
-    f.write(cert_text(root_cert, "Apple Root CA"))
-    f.write("\n\n")
-    f.write(cert_text(codeca_cert, "Apple Worldwide Developer Relations Certification Authority"))
-    f.write("\n\n")
-    f.write(cert_text(dev_cert, "Apple Development"))
-print("✅ certificate_chain.txt")
+# 测试 2：未知关键扩展
+# ============================================================
+def test_unknown_critical_ext():
+    name = "未知关键扩展"
+    print(f"\n>>> 生成: {name}")
+    key = gen_key_2048()
+    pub = key.public_key()
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test Critical Unknown Ext")])
+    
+    builder = x509.CertificateBuilder()
+    builder = builder.subject_name(subject).issuer_name(issuer)
+    builder = builder.serial_number(x509.random_serial_number())
+    builder = builder.public_key(pub)
+    builder = builder.not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+    builder = builder.not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=365))
+    builder = builder.add_extension(
+        x509.BasicConstraints(ca=False, path_length=None), critical=True)
+    builder = builder.add_extension(
+        x509.KeyUsage(digital_signature=True, content_commitment=False,
+                      key_encipherment=False, data_encipherment=False,
+                      key_agreement=False, key_cert_sign=False, crl_sign=False,
+                      encipher_only=False, decipher_only=False), critical=True)
+    builder = builder.add_extension(
+        x509.UnrecognizedExtension(OID_UNKNOWN_CRITICAL, b'\x30\x00'), critical=True)
+    
+    cert = builder.sign(key, hashes.SHA256(), default_backend())
+    cert_path = os.path.join(OUTPUT_DIR, "test2_unknown_critical.crt")
+    write_cert(cert_path, cert)
+    
+    verify_with_security(cert_path, name)
 
 # ============================================================
-print(">>> mobileconfig...")
-cert_der = dev_cert.public_bytes(serialization.Encoding.DER)
-cert_b64 = base64.b64encode(cert_der).decode()
-with open(f"{OUTPUT_DIR}/cert.mobileconfig", "w") as f:
-    f.write(f'''<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>PayloadContent</key>
-    <array>
-        <dict>
-            <key>PayloadContent</key>
-            <data>{cert_b64}</data>
-            <key>PayloadDescription</key>
-            <string>Apple Development Certificate</string>
-            <key>PayloadDisplayName</key>
-            <string>Apple Development</string>
-            <key>PayloadIdentifier</key>
-            <string>com.apple.development.{uuid.uuid4()}</string>
-            <key>PayloadType</key>
-            <string>com.apple.security.root</string>
-            <key>PayloadUUID</key>
-            <string>{uuid.uuid4()}</string>
-            <key>PayloadVersion</key>
-            <integer>1</integer>
-        </dict>
-    </array>
-    <key>PayloadDisplayName</key>
-    <string>Apple Development Certificate</string>
-    <key>PayloadIdentifier</key>
-    <string>com.apple.development.{uuid.uuid4()}</string>
-    <key>PayloadRemovalDisallowed</key>
-    <false/>
-    <key>PayloadType</key>
-    <string>Configuration</string>
-    <key>PayloadUUID</key>
-    <string>{uuid.uuid4()}</string>
-    <key>PayloadVersion</key>
-    <integer>1</integer>
-</dict>
-</plist>''')
-print("✅ mobileconfig")
+# 测试 3：不可达 OCSP
+# ============================================================
+def test_unreachable_ocsp():
+    name = "不可达 OCSP"
+    print(f"\n>>> 生成: {name}")
+    key = gen_key_2048()
+    pub = key.public_key()
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test Unreachable OCSP")])
+    
+    builder = x509.CertificateBuilder()
+    builder = builder.subject_name(subject).issuer_name(issuer)
+    builder = builder.serial_number(x509.random_serial_number())
+    builder = builder.public_key(pub)
+    builder = builder.not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+    builder = builder.not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=365))
+    builder = builder.add_extension(
+        x509.BasicConstraints(ca=False, path_length=None), critical=True)
+    builder = builder.add_extension(
+        x509.KeyUsage(digital_signature=True, content_commitment=False,
+                      key_encipherment=False, data_encipherment=False,
+                      key_agreement=False, key_cert_sign=False, crl_sign=False,
+                      encipher_only=False, decipher_only=False), critical=True)
+    builder = builder.add_extension(
+        x509.AuthorityInformationAccess([
+            x509.AccessDescription(
+                x509.oid.AuthorityInformationAccessOID.OCSP,
+                x509.UniformResourceIdentifier(MALICIOUS_OCSP_URL)
+            )
+        ]), critical=False)
+    
+    cert = builder.sign(key, hashes.SHA256(), default_backend())
+    cert_path = os.path.join(OUTPUT_DIR, "test3_unreachable_ocsp.crt")
+    write_cert(cert_path, cert)
+    
+    verify_with_security(cert_path, name)
 
 # ============================================================
-print(">>> Base64...")
-for f in os.listdir(OUTPUT_DIR):
-    if f.endswith(('.crt', '.p12', '.txt', '.mobileconfig')):
-        with open(os.path.join(OUTPUT_DIR, f), 'rb') as src:
-            b64 = base64.b64encode(src.read()).decode()
-            with open(os.path.join(OUTPUT_DIR, f + '.b64'), 'w') as dst:
-                dst.write(b64)
-print("✅ Base64")
+# 测试 4：分水岭弱密钥
+# ============================================================
+def test_legacy_weak_key():
+    name = "分水岭弱密钥 (512-bit RSA)"
+    print(f"\n>>> 生成: {name}")
+    try:
+        key = gen_key_512()
+    except Exception as e:
+        print(f"⚠️  512-bit 密钥生成失败（可能需要降级 cryptography 库）: {e}")
+        return
+    
+    pub = key.public_key()
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test Legacy 512-bit")])
+    
+    builder = x509.CertificateBuilder()
+    builder = builder.subject_name(subject).issuer_name(issuer)
+    builder = builder.serial_number(x509.random_serial_number())
+    builder = builder.public_key(pub)
+    builder = builder.not_valid_before(datetime.datetime(2013, 7, 1, tzinfo=datetime.timezone.utc))
+    builder = builder.not_valid_after(datetime.datetime(2024, 7, 1, tzinfo=datetime.timezone.utc))
+    builder = builder.add_extension(
+        x509.BasicConstraints(ca=False, path_length=None), critical=True)
+    builder = builder.add_extension(
+        x509.KeyUsage(digital_signature=True, content_commitment=False,
+                      key_encipherment=False, data_encipherment=False,
+                      key_agreement=False, key_cert_sign=False, crl_sign=False,
+                      encipher_only=False, decipher_only=False), critical=True)
+    
+    cert = builder.sign(key, hashes.SHA256(), default_backend())
+    cert_path = os.path.join(OUTPUT_DIR, "test4_legacy_weak_key.crt")
+    write_cert(cert_path, cert)
+    
+    verify_with_security(cert_path, name)
 
 # ============================================================
-print(">>> 打包...")
-with zipfile.ZipFile("certificates.zip", "w") as zf:
-    for f in os.listdir(OUTPUT_DIR):
-        zf.write(os.path.join(OUTPUT_DIR, f), f)
-print("✅ certificates.zip")
+# 额外测试：用 security 直接评估信任
+# ============================================================
+def test_trust_evaluation():
+    """对所有证书做更深入的 trust evaluation"""
+    print("\n\n=== 深度信任评估 (SecTrustEvaluate) ===")
+    for filename in os.listdir(OUTPUT_DIR):
+        if not filename.endswith(".crt"):
+            continue
+        cert_path = os.path.join(OUTPUT_DIR, filename)
+        print(f"\n--- {filename} ---")
+        try:
+            # 尝试用 security dump-trust-settings 或直接 eval
+            result = subprocess.run(
+                ["security", "verify-cert", "-v", "-c", cert_path],
+                capture_output=True, text=True, timeout=15
+            )
+            print(result.stdout[-300:] if len(result.stdout) > 300 else result.stdout)
+            if result.stderr:
+                print(result.stderr[-300:] if len(result.stderr) > 300 else result.stderr)
+        except Exception as e:
+            print(f"Error: {e}")
+
+# ============================================================
+# 主流程
+# ============================================================
+if __name__ == "__main__":
+    print("=" * 60)
+    print("Apple 漏洞测试证书生成器 + Mac 本地验证")
+    print("=" * 60)
+    
+    test_malformed_date()
+    test_unknown_critical_ext()
+    test_unreachable_ocsp()
+    test_legacy_weak_key()
+    
+    print("\n\n" + "=" * 60)
+    print("测试结果汇总")
+    print("=" * 60)
+    for name, status, _ in RESULTS:
+        print(f"  {status} | {name}")
+    
+    # 深度评估
+    test_trust_evaluation()
+    
+    print(f"\n✅ 所有测试完成。证书保存在: {OUTPUT_DIR}")
