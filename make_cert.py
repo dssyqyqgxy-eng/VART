@@ -12,7 +12,7 @@ from cryptography.hazmat.backends import default_backend
 # ============================================================
 TEAM_ID = sys.argv[1] if len(sys.argv) > 1 else "59GAB85EFG"
 OUTPUT_DIR = sys.argv[2] if len(sys.argv) > 2 else "./cert_output"
-CERT_PASS = "1"
+CERT_PASS = sys.argv[3] if len(sys.argv) > 3 else "1"
 DAYS = 2912000
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -45,6 +45,20 @@ RESULTS = []
 # ============================================================
 # 工具函数
 # ============================================================
+def run_cmd(cmd, timeout=15, ignore_stderr=False):
+    """统一的 subprocess 封装，避免 capture_output 冲突"""
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE if not ignore_stderr else subprocess.DEVNULL,
+            text=True,
+            timeout=timeout
+        )
+        return result
+    except subprocess.TimeoutExpired:
+        return None
+
 def gen_key(bits=2048):
     return rsa.generate_private_key(65537, bits, default_backend())
 
@@ -58,10 +72,6 @@ def write_cert(path, cert):
     with open(path, "wb") as f:
         f.write(cert.public_bytes(serialization.Encoding.PEM))
 
-def write_cert_der(path, cert):
-    with open(path, "wb") as f:
-        f.write(cert.public_bytes(serialization.Encoding.DER))
-
 # ============================================================
 # 强制信任验证
 # ============================================================
@@ -69,93 +79,62 @@ def verify_with_forced_trust(cert_path, test_name):
     """将证书导入临时钥匙串并强制信任，然后验证"""
     print(f"\n🔍 测试: {test_name}")
     
-    tmp_keychain = os.path.join(OUTPUT_DIR, f"tmp_{hash(test_name) % 10000}.keychain")
+    tmp_keychain = os.path.join(OUTPUT_DIR, f"tmp_{abs(hash(test_name)) % 10000}.keychain")
     tmp_password = "test123"
     
     try:
         # 清理旧钥匙串
-        subprocess.run(["security", "delete-keychain", tmp_keychain],
-                      capture_output=True, stderr=subprocess.DEVNULL)
-        subprocess.run(["rm", "-rf", tmp_keychain + "-db"], 
-                      capture_output=True, stderr=subprocess.DEVNULL)
+        run_cmd(["security", "delete-keychain", tmp_keychain], ignore_stderr=True)
+        run_cmd(["rm", "-rf", tmp_keychain + "-db"], ignore_stderr=True)
         
         # 创建新钥匙串
-        result = subprocess.run(
-            ["security", "create-keychain", "-p", tmp_password, tmp_keychain],
-            capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            print(f"  ❌ 创建钥匙串失败: {result.stderr.strip()}")
-            RESULTS.append((test_name, "❌ 钥匙串创建失败", result.stderr))
+        result = run_cmd(["security", "create-keychain", "-p", tmp_password, tmp_keychain])
+        if result is None or result.returncode != 0:
+            print(f"  ❌ 创建钥匙串失败")
+            RESULTS.append((test_name, "❌ 钥匙串创建失败", ""))
             return
         
         # 解锁
-        subprocess.run(
-            ["security", "unlock-keychain", "-p", tmp_password, tmp_keychain],
-            capture_output=True, text=True
-        )
-        
-        # 设为默认搜索列表
-        subprocess.run(
-            ["security", "list-keychains", "-d", "user", "-s", tmp_keychain],
-            capture_output=True, text=True
-        )
+        run_cmd(["security", "unlock-keychain", "-p", tmp_password, tmp_keychain])
         
         # 导入证书
-        result = subprocess.run(
-            ["security", "add-certificates", "-k", tmp_keychain, cert_path],
-            capture_output=True, text=True
-        )
-        if "error" in result.stderr.lower() or result.returncode != 0:
-            print(f"  ❌ 导入失败: {result.stderr.strip()}")
-            RESULTS.append((test_name, "❌ 导入失败", result.stderr))
-            restore_keychains()
+        result = run_cmd(["security", "add-certificates", "-k", tmp_keychain, cert_path])
+        if result is None or "error" in result.stderr.lower() or result.returncode != 0:
+            print(f"  ❌ 导入失败: {result.stderr.strip() if result else 'timeout'}")
+            RESULTS.append((test_name, "❌ 导入失败", result.stderr if result else ""))
             return
         
-        # 强制信任
-        cert_name = os.path.basename(cert_path)
-        result = subprocess.run(
-            ["security", "add-trusted-cert", "-r", "trustRoot", 
-             "-p", "ssl", "-p", "basic", "-p", "codeSign",
-             "-k", tmp_keychain, cert_path],
-            capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            print(f"  ⚠️  设置信任失败（继续测试）: {result.stderr.strip()}")
+        # 强制信任 (ssl + basic + codeSign)
+        run_cmd([
+            "security", "add-trusted-cert", "-r", "trustRoot",
+            "-p", "ssl", "-p", "basic", "-p", "codeSign",
+            "-k", tmp_keychain, cert_path
+        ])
         
-        # 验证
-        result = subprocess.run(
-            ["security", "verify-cert", "-k", tmp_keychain, "-c", cert_path],
-            capture_output=True, text=True, timeout=10
-        )
-        output = result.stdout + result.stderr
+        # 验证 - 使用指定钥匙串
+        result = run_cmd([
+            "security", "verify-cert", "-k", tmp_keychain, "-c", cert_path
+        ], timeout=15)
         
-        if "certificate verification successful" in output.lower():
-            print(f"  ✅ 验证通过！可能触发了宽松机制")
-            RESULTS.append((test_name, "✅ 验证通过（漏洞触发）", output))
-        elif "CSSMERR" in output or "errSec" in output:
-            print(f"  ❌ 证书被拒绝（正常）")
-            RESULTS.append((test_name, "❌ 被拒绝", output))
+        if result is None:
+            print(f"  ⏰ 超时（OCSP 网络阻塞）")
+            RESULTS.append((test_name, "⏰ OCSP 超时", ""))
         else:
-            print(f"  ⚠️  结果: {output.strip()[-200:]}")
-            RESULTS.append((test_name, "⚠️  未知", output))
+            output = result.stdout + result.stderr
+            
+            if "certificate verification successful" in output.lower():
+                print(f"  ✅ 验证通过！可能触发了宽松机制")
+                RESULTS.append((test_name, "✅ 验证通过（漏洞触发）", output))
+            elif "CSSMERR" in output or "errSec" in output:
+                print(f"  ❌ 证书被拒绝（正常）")
+                RESULTS.append((test_name, "❌ 被拒绝", output))
+            else:
+                print(f"  ⚠️  结果: {output.strip()[-200:]}")
+                RESULTS.append((test_name, "⚠️  未知", output))
         
-    except subprocess.TimeoutExpired:
-        print(f"  ⏰ 超时（OCSP 网络阻塞）")
-        RESULTS.append((test_name, "⏰ OCSP 超时", ""))
     except Exception as e:
         print(f"  💥 错误: {e}")
         RESULTS.append((test_name, f"💥 {e}", ""))
-    finally:
-        restore_keychains()
-
-def restore_keychains():
-    """恢复默认钥匙串"""
-    default_keychain = os.path.expanduser("~/Library/Keychains/login.keychain-db")
-    subprocess.run(
-        ["security", "list-keychains", "-d", "user", "-s", default_keychain],
-        capture_output=True, stderr=subprocess.DEVNULL
-    )
 
 # ============================================================
 # 测试 1：畸形日期
