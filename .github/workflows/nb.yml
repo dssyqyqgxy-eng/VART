@@ -1,4 +1,4 @@
-name: CoreTrust 深度内核分析
+name: CoreTrust 深度分析
 
 on:
   push:
@@ -19,7 +19,11 @@ jobs:
       - name: 解压框架文件
         run: |
           unzip -q amfid.zip -d extracted_frameworks/ 2>/dev/null || true
+          echo "=== 解压内容 ==="
           find extracted_frameworks -type f 2>/dev/null
+          echo "=== 根目录文件 ==="
+          ls -lh amfid installd trustd 2>/dev/null || true
+          ls -lh kernelcache* 2>/dev/null || true
 
       - name: 安装分析工具
         run: |
@@ -27,154 +31,158 @@ jobs:
           brew tap blacktop/tap && brew install ipsw
           sudo curl -L -o /usr/local/bin/class-dump https://github.com/AloneMonkey/MonkeyDev/raw/master/bin/class-dump
           sudo chmod +x /usr/local/bin/class-dump
-          curl -L -o ghidra.zip "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.0.3_build/ghidra_11.0.3_PUBLIC_20240410.zip"
-          unzip -q ghidra.zip -d ghidra_install
-          GHIDRA_HOME=$(find ghidra_install -name "ghidra_*" -type d -maxdepth 1 | head -1)
-          echo "GHIDRA_HOME=$(pwd)/$GHIDRA_HOME" >> $GITHUB_ENV
+          echo "=== 工具版本 ==="
+          radare2 -v | head -1
+          ipsw version | head -1
+          class-dump 2>&1 | head -1 || true
 
       - name: 创建输出目录
-        run: mkdir -p analysis/{coretrust,symbols,strings,disasm,kexts,addresses,reports}
+        run: |
+          mkdir -p output/{coretrust,disasm,addresses,kexts,daemons,frameworks,reports}
 
       - name: 准备内核缓存
         run: |
           KERNELCACHE=$(find . -name "kernelcache*" -type f ! -name "*.txt" ! -name "*.md" 2>/dev/null | head -1)
           if [ -n "$KERNELCACHE" ]; then
+            echo "找到内核缓存: $KERNELCACHE"
             file "$KERNELCACHE"
             if file "$KERNELCACHE" | grep -q "lzfse"; then
-              lzfse -decode -i "$KERNELCACHE" -o kernelcache.dec
+              echo "解压 lzfse..."
+              lzfse -decode -i "$KERNELCACHE" -o output/kernelcache.dec
             else
-              cp "$KERNELCACHE" kernelcache.dec
+              cp "$KERNELCACHE" output/kernelcache.dec
             fi
-            echo "KERNEL_TARGET=kernelcache.dec" >> $GITHUB_ENV
-            ls -lh kernelcache.dec
+            ls -lh output/kernelcache.dec
+            echo "KERNEL_TARGET=output/kernelcache.dec" >> $GITHUB_ENV
+          else
+            echo "未找到内核缓存文件"
           fi
 
       - name: 提取内核扩展
         run: |
           if [ -n "$KERNEL_TARGET" ] && [ -f "$KERNEL_TARGET" ]; then
-            echo "=== 提取内核扩展列表 ==="
-            ipsw kernel kexts "$KERNEL_TARGET" -j > analysis/kexts/kexts.json 2>&1 || true
-            ipsw kernel kexts "$KERNEL_TARGET" > analysis/kexts/kexts_list.txt 2>&1 || true
-            cat analysis/kexts/kexts_list.txt
+            echo "=== 内核扩展列表 ==="
+            ipsw kernel kexts "$KERNEL_TARGET" > output/kexts/kexts_list.txt 2>&1 || true
+            ipsw kernel kexts "$KERNEL_TARGET" -j > output/kexts/kexts.json 2>&1 || true
+            cat output/kexts/kexts_list.txt
+          fi
+
+      - name: 内核段信息和入口点
+        run: |
+          if [ -n "$KERNEL_TARGET" ] && [ -f "$KERNEL_TARGET" ]; then
+            echo "=== 内核段信息 ==="
+            otool -l "$KERNEL_TARGET" | grep -A5 "LC_SEGMENT_64" | grep -E "(segname|vmaddr)" > output/addresses/segments.txt 2>&1 || true
+            r2 -q -c 'aaaa; ie' "$KERNEL_TARGET" > output/addresses/entry_points.txt 2>&1 || true
+            r2 -q -c 'aaaa; iS' "$KERNEL_TARGET" > output/addresses/sections.txt 2>&1 || true
+            r2 -q -c 'aaaa; iM' "$KERNEL_TARGET" > output/addresses/memory_map.txt 2>&1 || true
+            cat output/addresses/segments.txt
           fi
 
       - name: 搜索 CoreTrust 字符串及偏移
         run: |
           if [ -n "$KERNEL_TARGET" ] && [ -f "$KERNEL_TARGET" ]; then
-            echo "=== 搜索 CoreTrust 相关字符串 ==="
-            strings -t x "$KERNEL_TARGET" | grep -iE "coretrust|CoreTrust|CORETRUST" > analysis/coretrust/strings_offset.txt 2>&1 || true
-            strings -t x "$KERNEL_TARGET" | grep -iE "trustcache|TrustCache|trust_cache" > analysis/coretrust/trustcache_offset.txt 2>&1 || true
-            strings -t x "$KERNEL_TARGET" | grep -iE "IMG4|IM4P|im4p_verify|im4p_parse|AppleImage4" > analysis/coretrust/img4_offset.txt 2>&1 || true
-            strings -t x "$KERNEL_TARGET" | grep -iE "cms_verify|cms_decode|cms_parse|pkcs7_verify" > analysis/coretrust/cms_offset.txt 2>&1 || true
-            strings -t x "$KERNEL_TARGET" | grep -iE "cdhash|CDHash|cd_hash" > analysis/coretrust/cdhash_offset.txt 2>&1 || true
-            strings -t x "$KERNEL_TARGET" | grep -iE "AMFI|amfi_|_amfi" > analysis/coretrust/amfi_offset.txt 2>&1 || true
-            strings -t x "$KERNEL_TARGET" | grep -iE "verify_signature|validate_signature|check_signature|verify_code|validate_code" > analysis/coretrust/verify_offset.txt 2>&1 || true
-            strings -t x "$KERNEL_TARGET" | grep -iE "entitlement|provision" > analysis/coretrust/entitlement_offset.txt 2>&1 || true
-            
             echo "=== CoreTrust 字符串偏移 ==="
-            cat analysis/coretrust/strings_offset.txt
-            echo ""
-            echo "=== TrustCache 字符串偏移 ==="
-            cat analysis/coretrust/trustcache_offset.txt
-            echo ""
-            echo "=== IMG4 字符串偏移 ==="
-            cat analysis/coretrust/img4_offset.txt
+            strings -t x "$KERNEL_TARGET" | grep -iE "coretrust|CoreTrust|CORETRUST" > output/coretrust/strings_coretrust.txt 2>&1 || true
+            strings -t x "$KERNEL_TARGET" | grep -iE "trustcache|TrustCache|trust_cache" > output/coretrust/strings_trustcache.txt 2>&1 || true
+            strings -t x "$KERNEL_TARGET" | grep -iE "IMG4|IM4P|im4p_verify|im4p_parse|AppleImage4" > output/coretrust/strings_img4.txt 2>&1 || true
+            strings -t x "$KERNEL_TARGET" | grep -iE "cms_verify|cms_decode|cms_parse|pkcs7_verify" > output/coretrust/strings_cms.txt 2>&1 || true
+            strings -t x "$KERNEL_TARGET" | grep -iE "cdhash|CDHash|cd_hash" > output/coretrust/strings_cdhash.txt 2>&1 || true
+            strings -t x "$KERNEL_TARGET" | grep -iE "AMFI|amfi_|_amfi" > output/coretrust/strings_amfi.txt 2>&1 || true
+            strings -t x "$KERNEL_TARGET" | grep -iE "verify_signature|validate_signature|check_signature" > output/coretrust/strings_verify.txt 2>&1 || true
+            strings -t x "$KERNEL_TARGET" | grep -iE "entitlement|provision" > output/coretrust/strings_entitlement.txt 2>&1 || true
+            
+            cat output/coretrust/strings_coretrust.txt
+            echo "---"
+            cat output/coretrust/strings_trustcache.txt
+            echo "---"
+            cat output/coretrust/strings_img4.txt
           fi
 
       - name: Radare2 交叉引用分析
         run: |
           if [ -n "$KERNEL_TARGET" ] && [ -f "$KERNEL_TARGET" ]; then
-            echo "=== r2 深度交叉引用 ==="
+            echo "=== 所有函数列表 ==="
+            r2 -q -c 'aaaa; afl' "$KERNEL_TARGET" > output/addresses/all_functions.txt 2>&1 || true
             
-            r2 -q -c 'aaaa; afl' "$KERNEL_TARGET" > analysis/addresses/all_functions.txt 2>&1 || true
+            echo "=== 交叉引用 ==="
+            r2 -q -c 'aaaa; /a coretrust' "$KERNEL_TARGET" > output/coretrust/xrefs_coretrust.txt 2>&1 || true
+            r2 -q -c 'aaaa; /a trustcache' "$KERNEL_TARGET" > output/coretrust/xrefs_trustcache.txt 2>&1 || true
+            r2 -q -c 'aaaa; /a img4' "$KERNEL_TARGET" > output/coretrust/xrefs_img4.txt 2>&1 || true
+            r2 -q -c 'aaaa; /a im4p' "$KERNEL_TARGET" > output/coretrust/xrefs_im4p.txt 2>&1 || true
+            r2 -q -c 'aaaa; /a cms' "$KERNEL_TARGET" > output/coretrust/xrefs_cms.txt 2>&1 || true
+            r2 -q -c 'aaaa; /a cdhash' "$KERNEL_TARGET" > output/coretrust/xrefs_cdhash.txt 2>&1 || true
+            r2 -q -c 'aaaa; /a AMFI' "$KERNEL_TARGET" > output/coretrust/xrefs_amfi.txt 2>&1 || true
+            r2 -q -c 'aaaa; /a verify' "$KERNEL_TARGET" | head -50 > output/coretrust/xrefs_verify.txt 2>&1 || true
+            r2 -q -c 'aaaa; /a validate' "$KERNEL_TARGET" | head -50 > output/coretrust/xrefs_validate.txt 2>&1 || true
+            r2 -q -c 'aaaa; /a signature' "$KERNEL_TARGET" | head -50 > output/coretrust/xrefs_signature.txt 2>&1 || true
             
-            r2 -q -c 'aaaa; /a coretrust' "$KERNEL_TARGET" > analysis/coretrust/coretrust_xrefs.txt 2>&1 || true
-            r2 -q -c 'aaaa; /a trustcache' "$KERNEL_TARGET" > analysis/coretrust/trustcache_xrefs.txt 2>&1 || true
-            r2 -q -c 'aaaa; /a img4' "$KERNEL_TARGET" > analysis/coretrust/img4_xrefs.txt 2>&1 || true
-            r2 -q -c 'aaaa; /a im4p' "$KERNEL_TARGET" > analysis/coretrust/im4p_xrefs.txt 2>&1 || true
-            r2 -q -c 'aaaa; /a cms' "$KERNEL_TARGET" > analysis/coretrust/cms_xrefs.txt 2>&1 || true
-            r2 -q -c 'aaaa; /a cdhash' "$KERNEL_TARGET" > analysis/coretrust/cdhash_xrefs.txt 2>&1 || true
-            r2 -q -c 'aaaa; /a AMFI' "$KERNEL_TARGET" > analysis/coretrust/amfi_xrefs.txt 2>&1 || true
-            
-            r2 -q -c 'aaaa; ie' "$KERNEL_TARGET" > analysis/addresses/entry_points.txt 2>&1 || true
-            r2 -q -c 'aaaa; iS' "$KERNEL_TARGET" > analysis/addresses/sections.txt 2>&1 || true
-            r2 -q -c 'aaaa; iM' "$KERNEL_TARGET" > analysis/addresses/segments.txt 2>&1 || true
-            
-            r2 -q -c 'aaaa; /a verify' "$KERNEL_TARGET" | head -50 > analysis/coretrust/verify_xrefs.txt 2>&1 || true
-            r2 -q -c 'aaaa; /a validate' "$KERNEL_TARGET" | head -50 > analysis/coretrust/validate_xrefs.txt 2>&1 || true
-            r2 -q -c 'aaaa; /a signature' "$KERNEL_TARGET" | head -50 > analysis/coretrust/signature_xrefs.txt 2>&1 || true
-            
-            echo "=== CoreTrust 交叉引用 ==="
-            cat analysis/coretrust/coretrust_xrefs.txt
+            cat output/coretrust/xrefs_coretrust.txt
           fi
 
       - name: 反汇编 CoreTrust 候选函数
         run: |
           if [ -n "$KERNEL_TARGET" ] && [ -f "$KERNEL_TARGET" ]; then
-            echo "=== 反汇编候选函数 ==="
+            echo "=== 反汇编 ==="
             
-            if [ -s analysis/coretrust/coretrust_xrefs.txt ]; then
-              grep -oP '0x[0-9a-f]+' analysis/coretrust/coretrust_xrefs.txt | head -10 | while read ADDR; do
-                echo "=== 函数地址 $ADDR ===" >> analysis/disasm/coretrust_functions.txt
-                r2 -q -c "aaaa; s $ADDR; pdf" "$KERNEL_TARGET" >> analysis/disasm/coretrust_functions.txt 2>&1 || true
-                r2 -q -c "aaaa; s $ADDR; pdc" "$KERNEL_TARGET" >> analysis/disasm/coretrust_decompiled.c 2>&1 || true
-              done
-            fi
-            
-            if [ -s analysis/coretrust/img4_xrefs.txt ]; then
-              grep -oP '0x[0-9a-f]+' analysis/coretrust/img4_xrefs.txt | head -10 | while read ADDR; do
-                echo "=== IMG4 函数 $ADDR ===" >> analysis/disasm/img4_functions.txt
-                r2 -q -c "aaaa; s $ADDR; pdf" "$KERNEL_TARGET" >> analysis/disasm/img4_functions.txt 2>&1 || true
-                r2 -q -c "aaaa; s $ADDR; pdc" "$KERNEL_TARGET" >> analysis/disasm/img4_decompiled.c 2>&1 || true
-              done
-            fi
+            for XREF_FILE in output/coretrust/xrefs_coretrust.txt output/coretrust/xrefs_img4.txt; do
+              if [ -s "$XREF_FILE" ]; then
+                grep -oP '0x[0-9a-f]+' "$XREF_FILE" | head -10 | while read ADDR; do
+                  echo "=== 函数 $ADDR ===" >> output/disasm/functions.txt
+                  r2 -q -c "aaaa; s $ADDR; pdf" "$KERNEL_TARGET" >> output/disasm/functions.txt 2>&1 || true
+                  echo "=== 伪代码 $ADDR ===" >> output/disasm/decompiled.c
+                  r2 -q -c "aaaa; s $ADDR; pdc" "$KERNEL_TARGET" >> output/disasm/decompiled.c 2>&1 || true
+                done
+              fi
+            done
           fi
 
-      - name: Ghidra 无头分析
-        if: env.KERNEL_TARGET != ''
-        run: |
-          if [ -n "$KERNEL_TARGET" ] && [ -f "$KERNEL_TARGET" ] && [ -n "$GHIDRA_HOME" ]; then
-            echo "=== Ghidra 自动分析内核 ==="
-            GHIDRA_HEADLESS="$GHIDRA_HOME/support/analyzeHeadless"
-            if [ -f "$GHIDRA_HEADLESS" ]; then
-              PROJECT_DIR="analysis/ghidra/kernel"
-              mkdir -p "$PROJECT_DIR"
-              "$GHIDRA_HEADLESS" "$PROJECT_DIR" "kernelcache" -import "$KERNEL_TARGET" -postScript "AutoAnalysis.java" -analysisTimeoutPerFile 600 2>&1 || true
-              echo "Ghidra 项目已创建: $PROJECT_DIR"
-            fi
-          fi
-
-      - name: 分析用户空间二进制文件
+      - name: 分析守护进程
         run: |
           for DAEMON in amfid installd trustd; do
             if [ -f "$DAEMON" ]; then
-              echo "=== $DAEMON CoreTrust 相关 ==="
-              strings "$DAEMON" | grep -iE "coretrust|trustcache|TrustCache|cdhash|CDHash|img4|IMG4|im4p|cms_verify|AMFI" | sort -u > analysis/coretrust/${DAEMON}_strings.txt 2>&1 || true
-              r2 -q -c 'aaa; /a amfi' "$DAEMON" > analysis/coretrust/${DAEMON}_xrefs.txt 2>&1 || true
-              nm -u "$DAEMON" | grep -iE "AMFI|Trust|Sign|Verify|Code" > analysis/coretrust/${DAEMON}_imports.txt 2>&1 || true
-              cat analysis/coretrust/${DAEMON}_strings.txt
+              echo "=== 分析 $DAEMON ==="
+              mkdir -p output/daemons/$DAEMON
+              
+              file "$DAEMON" > output/daemons/$DAEMON/info.txt
+              otool -hv "$DAEMON" > output/daemons/$DAEMON/header.txt 2>&1 || true
+              otool -l "$DAEMON" > output/daemons/$DAEMON/load_commands.txt 2>&1 || true
+              otool -L "$DAEMON" > output/daemons/$DAEMON/dylibs.txt 2>&1 || true
+              
+              nm -C -a "$DAEMON" > output/daemons/$DAEMON/symbols.txt 2>&1 || true
+              nm -gU "$DAEMON" > output/daemons/$DAEMON/exports.txt 2>&1 || true
+              nm -u "$DAEMON" | grep -iE "AMFI|Trust|Sign|Verify|Code|Core" > output/daemons/$DAEMON/imports_trust.txt 2>&1 || true
+              
+              strings "$DAEMON" | grep -iE "coretrust|trustcache|TrustCache|cdhash|CDHash|img4|IMG4|im4p|cms_verify|AMFI|signature|entitlement" | sort -u > output/daemons/$DAEMON/trust_strings.txt 2>&1 || true
+              strings -n 8 "$DAEMON" | sort -u > output/daemons/$DAEMON/all_strings.txt 2>&1 || true
+              
+              r2 -q -c 'aaa; afl' "$DAEMON" > output/daemons/$DAEMON/functions.txt 2>&1 || true
+              r2 -q -c 'aaa; s main; pdf' "$DAEMON" > output/daemons/$DAEMON/main_disasm.txt 2>&1 || true
+              r2 -q -c 'aaa; aac; pdc @ main' "$DAEMON" > output/daemons/$DAEMON/main_decompiled.c 2>&1 || true
             fi
           done
-          
+
+      - name: 分析框架
+        run: |
           SEC_BIN=$(find extracted_frameworks -type f -name "Security" 2>/dev/null | head -1)
           if [ -n "$SEC_BIN" ]; then
-            echo "=== Security.framework CoreTrust API ==="
-            nm -gU "$SEC_BIN" | grep -iE "SecCode|SecTrust|SecRequirement|SecStaticCode|SecTask" > analysis/coretrust/security_api.txt 2>&1 || true
-            strings "$SEC_BIN" | grep -iE "coretrust|trustcache|TrustCache" > analysis/coretrust/security_strings.txt 2>&1 || true
-            cat analysis/coretrust/security_api.txt | head -30
+            echo "=== Security.framework ==="
+            mkdir -p output/frameworks/security
+            nm -gU "$SEC_BIN" > output/frameworks/security/exports.txt 2>&1 || true
+            nm -gU "$SEC_BIN" | grep -iE "SecCode|SecTrust|SecRequirement|SecStaticCode|SecTask" > output/frameworks/security/api.txt 2>&1 || true
+            strings "$SEC_BIN" | grep -iE "coretrust|trustcache|TrustCache|cdhash|signature|verify" | sort -u > output/frameworks/security/trust_strings.txt 2>&1 || true
           fi
           
           AMFI_BIN=$(find extracted_frameworks -type f -name "AppleMobileFileIntegrity" 2>/dev/null | head -1)
           if [ -n "$AMFI_BIN" ]; then
-            echo "=== AMFI CoreTrust 接口 ==="
-            nm -gU "$AMFI_BIN" > analysis/coretrust/amfi_exports.txt 2>&1 || true
-            strings "$AMFI_BIN" | grep -iE "coretrust|trustcache|TrustCache" > analysis/coretrust/amfi_strings.txt 2>&1 || true
-            cat analysis/coretrust/amfi_strings.txt
+            echo "=== AppleMobileFileIntegrity ==="
+            mkdir -p output/frameworks/amfi
+            nm -gU "$AMFI_BIN" > output/frameworks/amfi/exports.txt 2>&1 || true
+            strings "$AMFI_BIN" | grep -iE "coretrust|trustcache|TrustCache|cdhash|signature|verify|amfi" | sort -u > output/frameworks/amfi/trust_strings.txt 2>&1 || true
           fi
 
       - name: 生成分析报告
         run: |
-          cat > analysis/reports/CORETRUST_MAP.md << 'REPORT'
+          cat > output/reports/CORETRUST_MAP.md << 'REPORT'
 # CoreTrust iOS 18.7.6 分析报告
 
 ## 代码签名验证流程
