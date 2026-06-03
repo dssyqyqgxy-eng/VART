@@ -19,9 +19,6 @@ jobs:
       - name: 解压框架
         run: |
           unzip -q amfid.zip -d extracted_frameworks/ 2>/dev/null || true
-          echo "=== 仓库文件 ==="
-          ls -lh amfid installd trustd kernelcache* 2>/dev/null || true
-          find extracted_frameworks -type f 2>/dev/null
 
       - name: 安装工具
         run: |
@@ -31,13 +28,13 @@ jobs:
       - name: 创建输出目录
         run: mkdir -p output/{kernel,launchd,daemons,frameworks,reports}
 
-      - name: 下载 IPSW 并提取 launchd 和 TrustCache
+      - name: 下载 IPSW 并提取 launchd
         run: |
-          echo "=== 下载固件 ==="
           curl -L -o firmware.ipsw "https://updates.cdn-apple.com/2026WinterFCS/fullrestores/047-83292/FC308431-84C0-4001-9A24-09FC77486C76/iPhone11,2,iPhone11,4,iPhone11,6_18.7.6_22H320_Restore.ipsw"
           
-          echo "=== 提取 launchd ==="
-          ipsw extract --files --pattern 'launchd$' --flat -o output/launchd firmware.ipsw
+          echo "=== 提取 launchd（从系统 DMG）==="
+          ipsw extract --files --pattern 'sbin/launchd$' --flat -o output/launchd firmware.ipsw 2>&1 || true
+          ipsw extract --files --pattern 'launchd$' --flat -o output/launchd firmware.ipsw 2>&1 || true
           
           echo "=== 提取 TrustCache ==="
           ipsw extract --files --pattern 'TrustCache' -o output/kernel firmware.ipsw 2>&1 || true
@@ -66,206 +63,14 @@ jobs:
             ls -lh output/kernel/kernelcache.dec
           fi
 
-      - name: 内核 CoreTrust/TrustCache/IMG4 字符串偏移
+      - name: 内核字符串偏移分析
         run: |
           if [ -n "$KERNEL_TARGET" ] && [ -f "$KERNEL_TARGET" ]; then
-            echo "=== CoreTrust ==="
-            strings -t x "$KERNEL_TARGET" | grep -iE "coretrust|CoreTrust|CORETRUST" > output/kernel/strings_coretrust.txt 2>&1 || true
-            
-            echo "=== TrustCache ==="
-            strings -t x "$KERNEL_TARGET" | grep -iE "trustcache|TrustCache|trust_cache|trustcache_add|trustcache_remove|trustcache_check|trustcache_lookup|trustcache_load|trustcache_get" > output/kernel/strings_trustcache.txt 2>&1 || true
-            
-            echo "=== IMG4/IM4P ==="
-            strings -t x "$KERNEL_TARGET" | grep -iE "IMG4|IM4P|im4p_verify|im4p_parse|im4p_create|AppleImage4|im4m|im4r" > output/kernel/strings_img4.txt 2>&1 || true
-            
-            echo "=== CDHash ==="
-            strings -t x "$KERNEL_TARGET" | grep -iE "cdhash|CDHash|cd_hash|cdhashes" > output/kernel/strings_cdhash.txt 2>&1 || true
-            
-            echo "=== AMFI ==="
-            strings -t x "$KERNEL_TARGET" | grep -iE "AMFI|amfi_|_amfi|AppleMobileFileIntegrity|amfi_check|amfi_verify" > output/kernel/strings_amfi.txt 2>&1 || true
-            
-            echo "=== CMS/PKCS7 ==="
-            strings -t x "$KERNEL_TARGET" | grep -iE "cms_verify|cms_decode|cms_parse|cms_sign|pkcs7|PKCS7|CMS" > output/kernel/strings_cms.txt 2>&1 || true
-            
-            echo "=== TeamID/OID ==="
-            strings -t x "$KERNEL_TARGET" | grep -iE "TeamID|team_id|teamid|OID|oid|1\.2\.840|1\.3\.6\.1|apple.*oid|com\.apple" > output/kernel/strings_teamid_oid.txt 2>&1 || true
-            
-            echo "=== 签名验证 ==="
-            strings -t x "$KERNEL_TARGET" | grep -iE "verify_signature|validate_signature|check_signature|verify_code|validate_code|verify_hash|check_hash" > output/kernel/strings_verify.txt 2>&1 || true
-            
-            echo "=== Entitlement ==="
-            strings -t x "$KERNEL_TARGET" | grep -iE "entitlement|Entitlement|entitle|provision|Provision" > output/kernel/strings_entitlement.txt 2>&1 || true
-            
-            cat output/kernel/strings_coretrust.txt
-            echo "---"
-            cat output/kernel/strings_trustcache.txt
-          fi
-
-      - name: 搜索 TeamID 和 OID
-        run: |
-          echo "=== 搜索 TeamID ==="
-          for BIN in amfid installd trustd; do
-            if [ -f "$BIN" ]; then
-              echo "--- $BIN ---"
-              strings "$BIN" | grep -iE "TeamID|team_id|teamid" | sort -u > output/daemons/${BIN}_teamid.txt 2>&1 || true
-              strings "$BIN" | grep -E "[A-Z0-9]{10,}" | grep -v "^[A-F0-9]*$" | sort -u >> output/daemons/${BIN}_teamid.txt 2>&1 || true
-              cat output/daemons/${BIN}_teamid.txt
-            fi
-          done
-          
-          if [ -n "$KERNEL_TARGET" ] && [ -f "$KERNEL_TARGET" ]; then
-            echo "=== 内核 OID ==="
-            strings -t x "$KERNEL_TARGET" | grep -E "(1\.2\.840\.113635|1\.3\.6\.1\.4\.1\.4755|apple|Apple)" | head -50 > output/kernel/oid_strings.txt 2>&1 || true
-            cat output/kernel/oid_strings.txt
-          fi
-
-      - name: Radare2 交叉引用
-        run: |
-          if [ -n "$KERNEL_TARGET" ] && [ -f "$KERNEL_TARGET" ]; then
-            r2 -q -c 'aaaa; afl' "$KERNEL_TARGET" > output/kernel/all_functions.txt 2>&1 || true
-            r2 -q -c 'aaaa; ie' "$KERNEL_TARGET" > output/kernel/entry_points.txt 2>&1 || true
-            r2 -q -c 'aaaa; iS' "$KERNEL_TARGET" > output/kernel/sections.txt 2>&1 || true
-            
-            r2 -q -c 'aaaa; /a coretrust' "$KERNEL_TARGET" > output/kernel/xrefs_coretrust.txt 2>&1 || true
-            r2 -q -c 'aaaa; /a trustcache' "$KERNEL_TARGET" > output/kernel/xrefs_trustcache.txt 2>&1 || true
-            r2 -q -c 'aaaa; /a img4' "$KERNEL_TARGET" > output/kernel/xrefs_img4.txt 2>&1 || true
-            r2 -q -c 'aaaa; /a cdhash' "$KERNEL_TARGET" > output/kernel/xrefs_cdhash.txt 2>&1 || true
-            r2 -q -c 'aaaa; /a amfi' "$KERNEL_TARGET" > output/kernel/xrefs_amfi.txt 2>&1 || true
-            r2 -q -c 'aaaa; /a cms' "$KERNEL_TARGET" > output/kernel/xrefs_cms.txt 2>&1 || true
-            r2 -q -c 'aaaa; /a verify' "$KERNEL_TARGET" | head -50 > output/kernel/xrefs_verify.txt 2>&1 || true
-            r2 -q -c 'aaaa; /a entitlement' "$KERNEL_TARGET" | head -50 > output/kernel/xrefs_entitlement.txt 2>&1 || true
-            
-            cat output/kernel/xrefs_trustcache.txt
-          fi
-
-      - name: 反汇编 TrustCache 函数
-        run: |
-          if [ -n "$KERNEL_TARGET" ] && [ -f "$KERNEL_TARGET" ]; then
-            for XREF in output/kernel/xrefs_trustcache.txt output/kernel/xrefs_coretrust.txt; do
-              if [ -s "$XREF" ]; then
-                grep -oP '0x[0-9a-f]+' "$XREF" | head -15 | while read ADDR; do
-                  echo "=== $ADDR ===" >> output/kernel/disasm_trustcache.txt
-                  r2 -q -c "aaaa; s $ADDR; pdf" "$KERNEL_TARGET" >> output/kernel/disasm_trustcache.txt 2>&1 || true
-                  echo "=== 伪代码 $ADDR ===" >> output/kernel/decompiled_trustcache.c
-                  r2 -q -c "aaaa; s $ADDR; pdc" "$KERNEL_TARGET" >> output/kernel/decompiled_trustcache.c 2>&1 || true
-                done
-              fi
-            done
-          fi
-
-      - name: 分析 launchd 漏洞
-        run: |
-          LAUNCHD=$(find output/launchd -type f -name "launchd" 2>/dev/null | head -1)
-          if [ -n "$LAUNCHD" ]; then
-            echo "=== launchd 基础信息 ==="
-            file "$LAUNCHD" > output/launchd/info.txt
-            otool -hv "$LAUNCHD" > output/launchd/header.txt 2>&1 || true
-            otool -l "$LAUNCHD" > output/launchd/load_commands.txt 2>&1 || true
-            
-            echo "=== launchd 符号表 ==="
-            nm -C -a "$LAUNCHD" > output/launchd/symbols.txt 2>&1 || true
-            nm -gU "$LAUNCHD" > output/launchd/exports.txt 2>&1 || true
-            nm -u "$LAUNCHD" > output/launchd/imports.txt 2>&1 || true
-            
-            echo "=== Mach 消息处理 ==="
-            strings "$LAUNCHD" | grep -iE "mach_msg|mach_port|mach_trap|mach_host|task_for_pid|host_get" | sort -u > output/launchd/vuln_mach.txt 2>&1 || true
-            
-            echo "=== XPC 服务 ==="
-            strings "$LAUNCHD" | grep -iE "xpc_connection|xpc_dictionary|xpc_pipe|bootstrap|bootstrap_check_in" | sort -u > output/launchd/vuln_xpc.txt 2>&1 || true
-            
-            echo "=== plist 解析 ==="
-            strings "$LAUNCHD" | grep -iE "plist|CFPropertyList|ProgramArguments|LaunchDaemon|LaunchAgent" | sort -u > output/launchd/vuln_plist.txt 2>&1 || true
-            
-            echo "=== 权限提升 ==="
-            strings "$LAUNCHD" | grep -iE "entitlement|credential|setuid|setgid|task_for_pid|proc_*|csops" | sort -u > output/launchd/vuln_priv.txt 2>&1 || true
-            
-            echo "=== 路径遍历 ==="
-            strings "$LAUNCHD" | grep -iE "realpath|symlink|readlink|stat|chdir|chroot" | sort -u > output/launchd/vuln_path.txt 2>&1 || true
-            
-            echo "=== 进程启动 ==="
-            strings "$LAUNCHD" | grep -iE "posix_spawn|execve|fork|vfork|spawn" | sort -u > output/launchd/vuln_spawn.txt 2>&1 || true
-            
-            echo "=== 环境变量 ==="
-            strings "$LAUNCHD" | grep -iE "environ|DYLD_INSERT|DYLD_LIBRARY|getenv|setenv|LD_PRELOAD" | sort -u > output/launchd/vuln_env.txt 2>&1 || true
-            
-            echo "=== 签名验证 ==="
-            strings "$LAUNCHD" | grep -iE "codesign|signature|verify|cdhash|trustcache|amfi|coretrust" | sort -u > output/launchd/vuln_sign.txt 2>&1 || true
-            
-            echo "=== 字符串搜索 ==="
-            strings "$LAUNCHD" | grep -iE "TeamID|team_id|OID|oid|1\.2\.840|1\.3\.6\.1" | sort -u > output/launchd/teamid_oid.txt 2>&1 || true
-            
-            echo "=== 反汇编 ==="
-            r2 -q -c 'aaa; afl' "$LAUNCHD" > output/launchd/functions.txt 2>&1 || true
-            r2 -q -c 'aaa; s main; pdf' "$LAUNCHD" > output/launchd/main_disasm.txt 2>&1 || true
-            r2 -q -c 'aaa; aac; pdc @ main' "$LAUNCHD" > output/launchd/main_decompiled.c 2>&1 || true
-            
-            cat output/launchd/vuln_mach.txt
-          fi
-
-      - name: 分析守护进程
-        run: |
-          for DAEMON in amfid installd trustd; do
-            if [ -f "$DAEMON" ]; then
-              echo "=== $DAEMON ==="
-              mkdir -p output/daemons/$DAEMON
-              
-              nm -C -a "$DAEMON" > output/daemons/$DAEMON/symbols.txt 2>&1 || true
-              nm -gU "$DAEMON" > output/daemons/$DAEMON/exports.txt 2>&1 || true
-              nm -u "$DAEMON" > output/daemons/$DAEMON/imports.txt 2>&1 || true
-              
-              strings "$DAEMON" | grep -iE "coretrust|trustcache|TrustCache|cdhash|CDHash|img4|IMG4|AMFI|amfi|signature|entitlement|CMS|pkcs7|TeamID|team_id|OID|oid" | sort -u > output/daemons/$DAEMON/trust_strings.txt 2>&1 || true
-              strings -n 8 "$DAEMON" | sort -u > output/daemons/$DAEMON/all_strings.txt 2>&1 || true
-              
-              r2 -q -c 'aaa; afl' "$DAEMON" > output/daemons/$DAEMON/functions.txt 2>&1 || true
-              r2 -q -c 'aaa; s main; pdf' "$DAEMON" > output/daemons/$DAEMON/main_disasm.txt 2>&1 || true
-              r2 -q -c 'aaa; aac; pdc @ main' "$DAEMON" > output/daemons/$DAEMON/main_decompiled.c 2>&1 || true
-              
-              cat output/daemons/$DAEMON/trust_strings.txt
-            fi
-          done
-
-      - name: 分析框架
-        run: |
-          SEC_BIN=$(find extracted_frameworks -type f -name "Security" 2>/dev/null | head -1)
-          if [ -n "$SEC_BIN" ]; then
-            echo "=== Security.framework ==="
-            mkdir -p output/frameworks/security
-            
-            file "$SEC_BIN" > output/frameworks/security/info.txt
-            nm -C -a "$SEC_BIN" > output/frameworks/security/symbols.txt 2>&1 || true
-            nm -gU "$SEC_BIN" > output/frameworks/security/exports.txt 2>&1 || true
-            nm -gU "$SEC_BIN" | grep -iE "SecCode|SecTrust|SecRequirement|SecStaticCode|SecTask|SecPolicy|SecCertificate|SecCMS|SecTransform" > output/frameworks/security/api.txt 2>&1 || true
-            
-            strings "$SEC_BIN" | grep -iE "coretrust|trustcache|cdhash|signature|verify|validate|cms|pkcs|img4|teamid|oid" | sort -u > output/frameworks/security/trust_strings.txt 2>&1 || true
-            strings "$SEC_BIN" | grep -iE "TeamID|team_id|OID|1\.2\.840|1\.3\.6\.1|com\.apple" | sort -u > output/frameworks/security/teamid_oid.txt 2>&1 || true
-            strings -n 8 "$SEC_BIN" | sort -u > output/frameworks/security/all_strings.txt 2>&1 || true
-            
-            r2 -q -c 'aaa; afl' "$SEC_BIN" > output/frameworks/security/functions.txt 2>&1 || true
-            
-            cat output/frameworks/security/api.txt | head -50
-          fi
-          
-          AMFI_BIN=$(find extracted_frameworks -type f -name "AppleMobileFileIntegrity" 2>/dev/null | head -1)
-          if [ -n "$AMFI_BIN" ]; then
-            echo "=== AppleMobileFileIntegrity.framework ==="
-            mkdir -p output/frameworks/amfi
-            
-            file "$AMFI_BIN" > output/frameworks/amfi/info.txt
-            nm -C -a "$AMFI_BIN" > output/frameworks/amfi/symbols.txt 2>&1 || true
-            nm -gU "$AMFI_BIN" > output/frameworks/amfi/exports.txt 2>&1 || true
-            
-            strings "$AMFI_BIN" | grep -iE "coretrust|trustcache|cdhash|signature|verify|validate|amfi|teamid|oid" | sort -u > output/frameworks/amfi/trust_strings.txt 2>&1 || true
-            strings "$AMFI_BIN" | grep -iE "TeamID|team_id|OID|1\.2\.840|1\.3\.6\.1|com\.apple" | sort -u > output/frameworks/amfi/teamid_oid.txt 2>&1 || true
-            strings -n 8 "$AMFI_BIN" | sort -u > output/frameworks/amfi/all_strings.txt 2>&1 || true
-            
-            r2 -q -c 'aaa; afl' "$AMFI_BIN" > output/frameworks/amfi/functions.txt 2>&1 || true
-            
-            cat output/frameworks/amfi/exports.txt | head -50
-          fi
-
-      - name: 生成完整报告
-        run: |
-          cat > output/reports/FULL_ANALYSIS.md << 'REPORT'
-# iOS 18.7.6 CoreTrust 完整逆向分析报告
-
-## 代码签名验证链
+            strings -t x "$KERNEL_TARGET" | grep -iE "coretrust|CoreTrust" > output/kernel/strings_coretrust.txt 2>&1 || true
+            strings -t x "$KERNEL_TARGET" | grep -iE "trustcache|TrustCache|trust_cache" > output/kernel/strings_trustcache.txt 2>&1 || true
+            strings -t x "$KERNEL_TARGET" | grep -iE "IMG4|IM4P|im4p_verify|AppleImage4" > output/kernel/strings_img4.txt 2>&1 || true
+            strings -t x "$KERNEL_TARGET" | grep -iE "cdhash|CDHash" > output/kernel/strings_cdhash.txt 2>&1 || true
+            strings -t x "$KERNEL_TARGET" | grep -iE "AMFI|amfi_" > output/kernel/strings_amfi.txt 2>&1 || true
+            strings -t x "$KERNEL_TARGET" | grep -iE "TeamID|team_id|OID|1\.2\.840" > output/kernel/strings_teamid.txt 2>&1 || true
+            strings -t x "$KERNEL_TARGET" | grep -iE "cms_verify|cms_decode|pkcs7" > output/kernel/strings_cms.txt 2>&1 || true
+            strings -t x "$KERNEL_TARGET" | grep -iE "verify_signature|validate_signature" > output/k
