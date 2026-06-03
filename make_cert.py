@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""漏洞 OID 测试证书生成器 - Apple 官方命名
+"""漏洞 OID 测试证书生成器 - Apple 官方命名（文件系统兼容）
 输出:
-  Apple Root CA.cer                根证书
-  AppleWWDRCAG3.cer                中间证书
-  Apple Development: <TeamID>.cer  叶子证书（开发证书）
-  Apple Development: <TeamID>.p12  P12 打包
+  Apple Root CA.cer
+  AppleWWDRCAG3.cer
+  Apple Development - <TeamID>.cer
+  Apple Development - <TeamID>.p12
 有效期: 1970-01-01 ~ 9999-12-31
 """
 import datetime, os, sys, base64, subprocess
@@ -23,6 +23,11 @@ CERT_PASS = sys.argv[3] if len(sys.argv) > 3 else "1"
 HEADER_B64 = "oi5z1pqAnwdA+zl3bbCS0Qr2dqU="
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# 文件名兼容字符映射
+def safe_name(name):
+    """替换文件名中的非法字符: 冒号 -> 短横"""
+    return name.replace(":", " -")
 
 # ============================================================
 # OID 定义
@@ -238,7 +243,6 @@ if __name__ == "__main__":
     root_pem = os.path.join(OUTPUT_DIR, "Apple Root CA.cer")
     with open(root_pem, "wb") as f:
         f.write(root_cert.public_bytes(serialization.Encoding.PEM))
-    # 带文件头的 DER
     write_der_with_header(os.path.join(OUTPUT_DIR, "Apple Root CA.der"), root_cert)
     print(f"✅ Apple Root CA.cer")
 
@@ -260,8 +264,9 @@ if __name__ == "__main__":
     print(f"✅ AppleWWDRCAG3.cer")
 
     # --- 叶子证书 ---
-    leaf_name = f"Apple Development: {TEAM_ID}"
-    print(f"\n>>> {leaf_name}")
+    leaf_display = f"Apple Development: {TEAM_ID}"
+    leaf_safe = safe_name(leaf_display)
+    print(f"\n>>> {leaf_display}")
     dev_key = gen_key()
     dev_subj = x509.Name([
         x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
@@ -271,15 +276,16 @@ if __name__ == "__main__":
     ])
     dev_cert = build_cert(dev_subj, codeca_subj, codeca_key, dev_key, is_ca=False)
     
-    leaf_cer = os.path.join(OUTPUT_DIR, f"Apple Development: {TEAM_ID}.cer")
+    leaf_cer = os.path.join(OUTPUT_DIR, leaf_safe + ".cer")
+    leaf_der = os.path.join(OUTPUT_DIR, leaf_safe + ".der")
     with open(leaf_cer, "wb") as f:
         f.write(dev_cert.public_bytes(serialization.Encoding.PEM))
-    write_der_with_header(os.path.join(OUTPUT_DIR, f"Apple Development: {TEAM_ID}.der"), dev_cert)
-    print(f"✅ Apple Development: {TEAM_ID}.cer")
+    write_der_with_header(leaf_der, dev_cert)
+    print(f"✅ {leaf_safe}.cer")
 
     # --- P12 ---
     print(f"\n>>> P12")
-    p12_path = os.path.join(OUTPUT_DIR, f"Apple Development: {TEAM_ID}.p12")
+    p12_path = os.path.join(OUTPUT_DIR, leaf_safe + ".p12")
     p12_data = pkcs12.serialize_key_and_certificates(
         b"Apple Development",
         dev_key, dev_cert,
@@ -288,13 +294,13 @@ if __name__ == "__main__":
     )
     with open(p12_path, "wb") as f:
         f.write(p12_data)
-    print(f"✅ Apple Development: {TEAM_ID}.p12")
+    print(f"✅ {leaf_safe}.p12")
 
     # --- 验证叶子证书 ---
     print("\n" + "=" * 60)
     print("开始验证...")
     print("=" * 60)
-    verify_with_forced_trust(leaf_cer, leaf_name)
+    verify_with_forced_trust(leaf_cer, leaf_display)
 
     # --- 汇总 ---
     print("\n" + "=" * 60)
@@ -305,14 +311,14 @@ if __name__ == "__main__":
         "Apple Root CA.der",
         "AppleWWDRCAG3.cer",
         "AppleWWDRCAG3.der",
-        f"Apple Development: {TEAM_ID}.cer",
-        f"Apple Development: {TEAM_ID}.der",
-        f"Apple Development: {TEAM_ID}.p12",
+        leaf_safe + ".cer",
+        leaf_safe + ".der",
+        leaf_safe + ".p12",
     ]
     for f in files:
         path = os.path.join(OUTPUT_DIR, f)
         size = os.path.getsize(path) if os.path.exists(path) else 0
-        print(f"  {f:45s}  {size:>8d} bytes")
+        print(f"  {f:50s}  {size:>8d} bytes")
     
     print("\n" + "=" * 60)
     print("证书中包含的漏洞 OID")
@@ -334,6 +340,6 @@ if __name__ == "__main__":
         print(f"  {status} | {name}")
     
     print(f"\n✅ 完成")
-    print(f"   CER 文件: {OUTPUT_DIR}/Apple Development: {TEAM_ID}.cer")
-    print(f"   P12 文件: {OUTPUT_DIR}/Apple Development: {TEAM_ID}.p12")
+    print(f"   CER 文件: {OUTPUT_DIR}/{leaf_safe}.cer")
+    print(f"   P12 文件: {OUTPUT_DIR}/{leaf_safe}.p12")
     print(f"   密码: {CERT_PASS}")
