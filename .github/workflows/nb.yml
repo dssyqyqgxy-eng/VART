@@ -73,4 +73,124 @@ jobs:
             strings -t x "$KERNEL_TARGET" | grep -iE "AMFI|amfi_" > output/kernel/strings_amfi.txt 2>&1 || true
             strings -t x "$KERNEL_TARGET" | grep -iE "TeamID|team_id|OID|1\.2\.840" > output/kernel/strings_teamid.txt 2>&1 || true
             strings -t x "$KERNEL_TARGET" | grep -iE "cms_verify|cms_decode|pkcs7" > output/kernel/strings_cms.txt 2>&1 || true
-            strings -t x "$KERNEL_TARGET" | grep -iE "verify_signature|validate_signature" > output/k
+            strings -t x "$KERNEL_TARGET" | grep -iE "verify_signature|validate_signature" > output/kernel/strings_verify.txt 2>&1 || true
+            strings -t x "$KERNEL_TARGET" | grep -iE "entitlement|Entitlement" > output/kernel/strings_entitlement.txt 2>&1 || true
+          fi
+
+      - name: r2 交叉引用
+        run: |
+          if [ -n "$KERNEL_TARGET" ] && [ -f "$KERNEL_TARGET" ]; then
+            r2 -q -c 'aaaa; afl' "$KERNEL_TARGET" > output/kernel/all_functions.txt 2>&1 || true
+            r2 -q -c 'aaaa; ie' "$KERNEL_TARGET" > output/kernel/entry_points.txt 2>&1 || true
+            r2 -q -c 'aaaa; /a coretrust' "$KERNEL_TARGET" > output/kernel/xrefs_coretrust.txt 2>&1 || true
+            r2 -q -c 'aaaa; /a trustcache' "$KERNEL_TARGET" > output/kernel/xrefs_trustcache.txt 2>&1 || true
+            r2 -q -c 'aaaa; /a img4' "$KERNEL_TARGET" > output/kernel/xrefs_img4.txt 2>&1 || true
+            r2 -q -c 'aaaa; /a cdhash' "$KERNEL_TARGET" > output/kernel/xrefs_cdhash.txt 2>&1 || true
+            r2 -q -c 'aaaa; /a amfi' "$KERNEL_TARGET" > output/kernel/xrefs_amfi.txt 2>&1 || true
+          fi
+
+      - name: 反汇编
+        run: |
+          if [ -n "$KERNEL_TARGET" ] && [ -f "$KERNEL_TARGET" ]; then
+            for XREF in output/kernel/xrefs_trustcache.txt output/kernel/xrefs_coretrust.txt output/kernel/xrefs_img4.txt; do
+              if [ -s "$XREF" ]; then
+                grep -oP '0x[0-9a-f]+' "$XREF" | head -10 | while read ADDR; do
+                  echo "=== $ADDR ===" >> output/kernel/disasm.txt
+                  r2 -q -c "aaaa; s $ADDR; pdf" "$KERNEL_TARGET" >> output/kernel/disasm.txt 2>&1 || true
+                done
+              fi
+            done
+          fi
+
+      - name: 分析 launchd
+        run: |
+          LAUNCHD=$(find output/launchd -type f -name "launchd" 2>/dev/null | head -1)
+          if [ -n "$LAUNCHD" ]; then
+            file "$LAUNCHD" > output/launchd/info.txt
+            nm -C -a "$LAUNCHD" > output/launchd/symbols.txt 2>&1 || true
+            nm -gU "$LAUNCHD" > output/launchd/exports.txt 2>&1 || true
+            nm -u "$LAUNCHD" > output/launchd/imports.txt 2>&1 || true
+            strings "$LAUNCHD" | grep -iE "mach_msg|mach_port|mach_trap|task_for_pid|bootstrap" | sort -u > output/launchd/vuln_mach.txt 2>&1 || true
+            strings "$LAUNCHD" | grep -iE "xpc_|bootstrap" | sort -u > output/launchd/vuln_xpc.txt 2>&1 || true
+            strings "$LAUNCHD" | grep -iE "plist|CFPropertyList|LaunchDaemon|ProgramArguments" | sort -u > output/launchd/vuln_plist.txt 2>&1 || true
+            strings "$LAUNCHD" | grep -iE "entitlement|setuid|setgid|task_for_pid|csops" | sort -u > output/launchd/vuln_priv.txt 2>&1 || true
+            strings "$LAUNCHD" | grep -iE "realpath|symlink|stat|readlink" | sort -u > output/launchd/vuln_path.txt 2>&1 || true
+            strings "$LAUNCHD" | grep -iE "posix_spawn|execve|fork|spawn" | sort -u > output/launchd/vuln_spawn.txt 2>&1 || true
+            strings "$LAUNCHD" | grep -iE "environ|DYLD_INSERT|getenv|setenv" | sort -u > output/launchd/vuln_env.txt 2>&1 || true
+            strings "$LAUNCHD" | grep -iE "codesign|signature|verify|cdhash|trustcache|amfi|coretrust" | sort -u > output/launchd/vuln_sign.txt 2>&1 || true
+            strings "$LAUNCHD" | grep -iE "TeamID|team_id|OID|1\.2\.840" | sort -u > output/launchd/teamid.txt 2>&1 || true
+            strings -n 8 "$LAUNCHD" | sort -u > output/launchd/all_strings.txt 2>&1 || true
+            r2 -q -c 'aaa; afl' "$LAUNCHD" > output/launchd/functions.txt 2>&1 || true
+          fi
+
+      - name: 分析守护进程
+        run: |
+          for DAEMON in amfid installd trustd; do
+            if [ -f "$DAEMON" ]; then
+              mkdir -p output/daemons/$DAEMON
+              nm -C -a "$DAEMON" > output/daemons/$DAEMON/symbols.txt 2>&1 || true
+              nm -gU "$DAEMON" > output/daemons/$DAEMON/exports.txt 2>&1 || true
+              nm -u "$DAEMON" > output/daemons/$DAEMON/imports.txt 2>&1 || true
+              strings "$DAEMON" | grep -iE "coretrust|trustcache|cdhash|img4|amfi|signature|entitlement|cms|teamid|oid" | sort -u > output/daemons/$DAEMON/trust_strings.txt 2>&1 || true
+              strings "$DAEMON" | grep -iE "TeamID|team_id|OID|1\.2\.840|com\.apple" | sort -u > output/daemons/$DAEMON/teamid.txt 2>&1 || true
+              strings -n 8 "$DAEMON" | sort -u > output/daemons/$DAEMON/all_strings.txt 2>&1 || true
+              r2 -q -c 'aaa; afl' "$DAEMON" > output/daemons/$DAEMON/functions.txt 2>&1 || true
+            fi
+          done
+
+      - name: 分析框架
+        run: |
+          SEC_BIN=$(find extracted_frameworks -type f -name "Security" 2>/dev/null | head -1)
+          if [ -n "$SEC_BIN" ]; then
+            mkdir -p output/frameworks/security
+            nm -C -a "$SEC_BIN" > output/frameworks/security/symbols.txt 2>&1 || true
+            nm -gU "$SEC_BIN" > output/frameworks/security/exports.txt 2>&1 || true
+            nm -gU "$SEC_BIN" | grep -iE "SecCode|SecTrust|SecRequirement|SecStaticCode|SecTask|SecPolicy|SecCertificate|SecCMS|SecTransform" > output/frameworks/security/api.txt 2>&1 || true
+            strings "$SEC_BIN" | grep -iE "coretrust|trustcache|cdhash|signature|verify|cms|pkcs|img4|teamid|oid" | sort -u > output/frameworks/security/trust_strings.txt 2>&1 || true
+            strings "$SEC_BIN" | grep -iE "TeamID|team_id|OID|1\.2\.840|com\.apple" | sort -u > output/frameworks/security/teamid.txt 2>&1 || true
+            strings -n 8 "$SEC_BIN" | sort -u > output/frameworks/security/all_strings.txt 2>&1 || true
+            r2 -q -c 'aaa; afl' "$SEC_BIN" > output/frameworks/security/functions.txt 2>&1 || true
+          fi
+          
+          AMFI_BIN=$(find extracted_frameworks -type f -name "AppleMobileFileIntegrity" 2>/dev/null | head -1)
+          if [ -n "$AMFI_BIN" ]; then
+            mkdir -p output/frameworks/amfi
+            nm -C -a "$AMFI_BIN" > output/frameworks/amfi/symbols.txt 2>&1 || true
+            nm -gU "$AMFI_BIN" > output/frameworks/amfi/exports.txt 2>&1 || true
+            strings "$AMFI_BIN" | grep -iE "coretrust|trustcache|cdhash|signature|verify|amfi|teamid|oid" | sort -u > output/frameworks/amfi/trust_strings.txt 2>&1 || true
+            strings "$AMFI_BIN" | grep -iE "TeamID|team_id|OID|1\.2\.840|com\.apple" | sort -u > output/frameworks/amfi/teamid.txt 2>&1 || true
+            strings -n 8 "$AMFI_BIN" | sort -u > output/frameworks/amfi/all_strings.txt 2>&1 || true
+            r2 -q -c 'aaa; afl' "$AMFI_BIN" > output/frameworks/amfi/functions.txt 2>&1 || true
+          fi
+
+      - name: 生成报告
+        run: |
+          echo "# iOS 18.7.6 CoreTrust 完整分析" > output/reports/FULL_ANALYSIS.md
+          echo "" >> output/reports/FULL_ANALYSIS.md
+          echo "## TrustCache 字符串" >> output/reports/FULL_ANALYSIS.md
+          cat output/kernel/strings_trustcache.txt >> output/reports/FULL_ANALYSIS.md 2>/dev/null || echo "未找到" >> output/reports/FULL_ANALYSIS.md
+          echo "" >> output/reports/FULL_ANALYSIS.md
+          echo "## CoreTrust 字符串" >> output/reports/FULL_ANALYSIS.md
+          cat output/kernel/strings_coretrust.txt >> output/reports/FULL_ANALYSIS.md 2>/dev/null || echo "未找到" >> output/reports/FULL_ANALYSIS.md
+          echo "" >> output/reports/FULL_ANALYSIS.md
+          echo "## IMG4 字符串" >> output/reports/FULL_ANALYSIS.md
+          cat output/kernel/strings_img4.txt >> output/reports/FULL_ANALYSIS.md 2>/dev/null || echo "未找到" >> output/reports/FULL_ANALYSIS.md
+          echo "" >> output/reports/FULL_ANALYSIS.md
+          echo "## TeamID/OID" >> output/reports/FULL_ANALYSIS.md
+          cat output/kernel/strings_teamid.txt >> output/reports/FULL_ANALYSIS.md 2>/dev/null || echo "未找到" >> output/reports/FULL_ANALYSIS.md
+          echo "" >> output/reports/FULL_ANALYSIS.md
+          echo "## 交叉引用" >> output/reports/FULL_ANALYSIS.md
+          cat output/kernel/xrefs_trustcache.txt >> output/reports/FULL_ANALYSIS.md 2>/dev/null || echo "未找到" >> output/reports/FULL_ANALYSIS.md
+          echo "" >> output/reports/FULL_ANALYSIS.md
+          echo "## launchd 漏洞" >> output/reports/FULL_ANALYSIS.md
+          cat output/launchd/vuln_mach.txt >> output/reports/FULL_ANALYSIS.md 2>/dev/null || echo "未找到" >> output/reports/FULL_ANALYSIS.md
+          echo "" >> output/reports/FULL_ANALYSIS.md
+          echo "## Security API" >> output/reports/FULL_ANALYSIS.md
+          cat output/frameworks/security/api.txt >> output/reports/FULL_ANALYSIS.md 2>/dev/null || echo "未找到" >> output/reports/FULL_ANALYSIS.md
+
+      - name: 上传分析结果
+        uses: actions/upload-artifact@v4
+        with:
+          name: coretrust_full_analysis
+          path: output/
+          retention-days: 90
