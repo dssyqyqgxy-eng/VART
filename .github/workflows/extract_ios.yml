@@ -33,18 +33,18 @@ jobs:
             for TABLE in $(sqlite3 valid.sqlite3 ".tables" 2>/dev/null); do
               echo "" >> output/valid_analysis.txt
               echo "=== $TABLE 结构 ===" >> output/valid_analysis.txt
-              sqlite3 valid.sqlite3 "PRAGMA table_info($TABLE);" >> output/valid_analysis.txt 2>&1
+              sqlite3 valid.sqlite3 "PRAGMA table_info($TABLE);" >> output/valid_analysis.txt 2>&1 || true
               
               echo "=== $TABLE 行数 ===" >> output/valid_analysis.txt
-              sqlite3 valid.sqlite3 "SELECT COUNT(*) FROM $TABLE;" >> output/valid_analysis.txt 2>&1
+              sqlite3 valid.sqlite3 "SELECT COUNT(*) FROM $TABLE;" >> output/valid_analysis.txt 2>&1 || true
               
               echo "=== $TABLE 数据 (hex) ===" >> output/valid_analysis.txt
-              sqlite3 valid.sqlite3 "SELECT * FROM $TABLE;" 2>/dev/null | head -100 | xxd | head -200 >> output/valid_analysis.txt
+              sqlite3 valid.sqlite3 "SELECT * FROM $TABLE;" 2>/dev/null | head -100 | xxd | head -200 >> output/valid_analysis.txt || true
             done
             
-            sqlite3 valid.sqlite3 "SELECT hex(cdhash) FROM code LIMIT 50;" 2>/dev/null > output/valid_cdhash.txt
+            sqlite3 valid.sqlite3 ".tables" 2>/dev/null | grep -qi "code" && sqlite3 valid.sqlite3 "SELECT hex(cdhash) FROM code LIMIT 50;" 2>/dev/null > output/valid_cdhash.txt || true
             
-            sqlite3 valid.sqlite3 "SELECT * FROM team;" 2>/dev/null | strings | head -100 > output/valid_team.txt
+            sqlite3 valid.sqlite3 ".tables" 2>/dev/null | grep -qi "team" && sqlite3 valid.sqlite3 "SELECT * FROM team;" 2>/dev/null | strings | head -100 > output/valid_team.txt || true
             
             cat output/valid_analysis.txt | head -200
           fi
