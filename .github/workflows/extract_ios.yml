@@ -1,4 +1,4 @@
-name: 完整 CoreTrust 分析
+name: 分析 valid.sqlite3 和 com.apple.tips
 
 on:
   push:
@@ -10,20 +10,14 @@ on:
 jobs:
   analyze:
     runs-on: macos-latest
-    timeout-minutes: 360
+    timeout-minutes: 30
 
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 解压框架
-        run: |
-          unzip -q amfid.zip -d extracted_frameworks/ 2>/dev/null || true
-
       - name: 安装工具
-        run: |
-          brew install radare2 lzfse binutils sqlite
-          brew tap blacktop/tap && brew install ipsw
+        run: brew install sqlite
 
       - name: 创建输出目录
         run: mkdir -p output
@@ -48,152 +42,17 @@ jobs:
           CODESIGN_DIR=$(find . -path "*_CodeSignature" -type d 2>/dev/null | head -1)
           if [ -n "$CODESIGN_DIR" ]; then
             APP_DIR=$(dirname "$CODESIGN_DIR")
-            
-            echo "=== 签名信息 ===" > output/tips_signature.txt
-            codesign -dvvv "$APP_DIR" >> output/tips_signature.txt 2>&1 || true
-            
-            echo "=== TeamID ===" > output/tips_teamid.txt
-            codesign -dv "$APP_DIR" 2>&1 | grep -iE "TeamIdentifier|Authority|Identifier|Signed Time" >> output/tips_teamid.txt || true
-            
-            mkdir -p output/tips_certs
-            codesign -d --extract-certs output/tips_certs "$APP_DIR" 2>&1 || true
-            
-            echo "=== 证书详细信息 ===" > output/tips_cert_details.txt
-            CERT_COUNT=0
-            for CERT in output/tips_certs/codesign*; do
-              if [ -f "$CERT" ]; then
-                CERT_COUNT=$((CERT_COUNT + 1))
-                echo "" >> output/tips_cert_details.txt
-                echo "========== 证书 $CERT_COUNT ==========" >> output/tips_cert_details.txt
-                openssl x509 -inform DER -in "$CERT" -text -noout 2>/dev/null >> output/tips_cert_details.txt || true
-              fi
-            done
-            
-            echo "=== OID 提取 ===" > output/tips_oid.txt
-            grep -E "OID|1\.2\.840|1\.3\.6\.1" output/tips_cert_details.txt 2>/dev/null | head -100 >> output/tips_oid.txt || true
-            
-            echo "=== 叶子证书(第一个) ===" > output/tips_leaf_cert.txt
-            if [ -f output/tips_certs/codesign0 ]; then
-              openssl x509 -inform DER -in output/tips_certs/codesign0 -text -noout 2>/dev/null >> output/tips_leaf_cert.txt || true
-            fi
-            
-            echo "=== 根证书(最后一个) ===" > output/tips_root_cert.txt
-            ROOT_CERT=$(ls output/tips_certs/codesign* 2>/dev/null | tail -1)
-            if [ -n "$ROOT_CERT" ] && [ -f "$ROOT_CERT" ]; then
-              openssl x509 -inform DER -in "$ROOT_CERT" -text -noout 2>/dev/null >> output/tips_root_cert.txt || true
-            fi
-            
-            echo "=== 证书中的 TeamID ===" > output/tips_cert_teamid.txt
-            grep -iE "TeamIdentifier|Team|Subject|Issuer|OU=" output/tips_cert_details.txt 2>/dev/null | head -50 >> output/tips_cert_teamid.txt || true
-            
+            codesign -dvvv "$APP_DIR" > output/tips_signature.txt 2>&1 || true
+            codesign -dv "$APP_DIR" 2>&1 | grep -iE "TeamIdentifier|Authority|Identifier|Signed Time" > output/tips_teamid.txt || true
+            security cms -D -i "$APP_DIR" > output/tips_cms.txt 2>&1 || true
+            grep -E "OID|1.2.840|1.3.6.1" output/tips_cms.txt 2>/dev/null | head -100 > output/tips_oid.txt || true
+            grep -iE "TeamIdentifier|Subject|Issuer|OU=" output/tips_cms.txt 2>/dev/null | head -50 > output/tips_cert_teamid.txt || true
             cat output/tips_teamid.txt
-            echo "---"
-            cat output/tips_oid.txt | head -30
-          fi
-
-      - name: 下载 IPSW 并提取 launchd
-        run: |
-          curl -L -o firmware.ipsw "https://updates.cdn-apple.com/2026WinterFCS/fullrestores/047-83292/FC308431-84C0-4001-9A24-09FC77486C76/iPhone11,2,iPhone11,4,iPhone11,6_18.7.6_22H320_Restore.ipsw"
-          ipsw extract --files --pattern 'launchd' --flat -o output firmware.ipsw 2>&1 || true
-          ipsw extract --files --pattern 'TrustCache' -o output firmware.ipsw 2>&1 || true
-
-      - name: 准备内核缓存
-        run: |
-          KERNELCACHE=$(find . -name "kernelcache*" -type f 2>/dev/null | head -1)
-          if [ -n "$KERNELCACHE" ]; then
-            if file "$KERNELCACHE" | grep -q "lzfse"; then
-              lzfse -decode -i "$KERNELCACHE" -o output/kernelcache.dec
-            elif file "$KERNELCACHE" | grep -q "img4"; then
-              ipsw img4 extract --im4p -o output "$KERNELCACHE" 2>&1 || true
-              if [ -f output/payload ]; then
-                mv output/payload output/kernelcache.dec
-              fi
-            else
-              cp "$KERNELCACHE" output/kernelcache.dec
-            fi
-          fi
-
-      - name: 搜索 TrustCache/AppleImage4/AMFI
-        run: |
-          if [ -f output/kernelcache.dec ]; then
-            strings -t x output/kernelcache.dec | grep -iE "trustcache|TrustCache" > output/strings_trustcache.txt 2>&1 || true
-            strings -t x output/kernelcache.dec | grep -iE "IMG4|IM4P|AppleImage4|im4p_verify" > output/strings_img4.txt 2>&1 || true
-            strings -t x output/kernelcache.dec | grep -iE "AMFI|amfi_" > output/strings_amfi.txt 2>&1 || true
-            strings -t x output/kernelcache.dec | grep -iE "cdhash|CDHash" > output/strings_cdhash.txt 2>&1 || true
-            strings -t x output/kernelcache.dec | grep -iE "TeamID|team_id|OID|1.2.840" > output/strings_teamid.txt 2>&1 || true
-            strings -t x output/kernelcache.dec | grep -iE "entitlement|provision" > output/strings_entitlement.txt 2>&1 || true
-            
-            r2 -q -c 'aaaa; afl' output/kernelcache.dec > output/r2_functions.txt 2>&1 || true
-            r2 -q -c 'aaaa; /a trustcache' output/kernelcache.dec > output/r2_trustcache_xrefs.txt 2>&1 || true
-            r2 -q -c 'aaaa; /a img4' output/kernelcache.dec > output/r2_img4_xrefs.txt 2>&1 || true
-            r2 -q -c 'aaaa; /a amfi' output/kernelcache.dec > output/r2_amfi_xrefs.txt 2>&1 || true
-            
-            cat output/strings_trustcache.txt
-          fi
-
-      - name: 反汇编 TrustCache 函数
-        run: |
-          if [ -f output/r2_trustcache_xrefs.txt ] && [ -f output/kernelcache.dec ]; then
-            grep -oP '0x[0-9a-f]+' output/r2_trustcache_xrefs.txt | head -10 | while read ADDR; do
-              echo "=== $ADDR ===" >> output/disasm_trustcache.txt
-              r2 -q -c "aaaa; s $ADDR; pdf" output/kernelcache.dec >> output/disasm_trustcache.txt 2>&1 || true
-            done
-          fi
-
-      - name: 分析 launchd
-        run: |
-          LAUNCHD=$(find output -name "launchd" -type f 2>/dev/null | head -1)
-          if [ -n "$LAUNCHD" ]; then
-            nm -C -a "$LAUNCHD" > output/launchd_symbols.txt 2>&1 || true
-            nm -u "$LAUNCHD" > output/launchd_imports.txt 2>&1 || true
-            strings "$LAUNCHD" | grep -iE "mach_msg|mach_port|task_for_pid|bootstrap|xpc_connection|xpc_pipe" | sort -u > output/launchd_vuln_mach.txt 2>&1 || true
-            strings "$LAUNCHD" | grep -iE "codesign|signature|verify|cdhash|trustcache|amfi|coretrust" | sort -u > output/launchd_vuln_sign.txt 2>&1 || true
-            strings "$LAUNCHD" | grep -iE "entitlement|setuid|setgid|posix_spawn|execve|fork|spawn" | sort -u > output/launchd_vuln_priv.txt 2>&1 || true
-            strings "$LAUNCHD" | grep -iE "TeamID|team_id|OID|1.2.840" | sort -u > output/launchd_teamid.txt 2>&1 || true
-            strings "$LAUNCHD" | grep -iE "plist|CFPropertyList|LaunchDaemon|ProgramArguments" | sort -u > output/launchd_vuln_plist.txt 2>&1 || true
-            strings -n 8 "$LAUNCHD" | sort -u > output/launchd_all_strings.txt 2>&1 || true
-          fi
-
-      - name: 分析守护进程
-        run: |
-          for DAEMON in amfid installd trustd; do
-            if [ -f "$DAEMON" ]; then
-              echo "=== $DAEMON ==="
-              nm -C -a "$DAEMON" > "output/${DAEMON}_symbols.txt" 2>&1 || true
-              nm -gU "$DAEMON" > "output/${DAEMON}_exports.txt" 2>&1 || true
-              nm -u "$DAEMON" > "output/${DAEMON}_imports.txt" 2>&1 || true
-              strings "$DAEMON" | grep -iE "coretrust|trustcache|cdhash|img4|amfi|signature|entitlement|cms|teamid|oid" | sort -u > "output/${DAEMON}_trust_strings.txt" 2>&1 || true
-              strings "$DAEMON" | grep -iE "TeamID|team_id|OID|1.2.840|com.apple" | sort -u > "output/${DAEMON}_teamid.txt" 2>&1 || true
-              strings -n 8 "$DAEMON" | sort -u > "output/${DAEMON}_all_strings.txt" 2>&1 || true
-            fi
-          done
-
-      - name: 分析框架
-        run: |
-          SEC_BIN=$(find extracted_frameworks -type f -name "Security" 2>/dev/null | head -1)
-          if [ -n "$SEC_BIN" ]; then
-            echo "=== Security.framework ==="
-            nm -C -a "$SEC_BIN" > output/security_symbols.txt 2>&1 || true
-            nm -gU "$SEC_BIN" > output/security_exports.txt 2>&1 || true
-            nm -gU "$SEC_BIN" | grep -iE "SecCode|SecTrust|SecRequirement|SecStaticCode|SecTask|SecPolicy|SecCertificate|SecCMS|SecTransform" > output/security_api.txt 2>&1 || true
-            strings "$SEC_BIN" | grep -iE "coretrust|trustcache|cdhash|signature|verify|cms|pkcs|img4|teamid|oid" | sort -u > output/security_trust_strings.txt 2>&1 || true
-            strings "$SEC_BIN" | grep -iE "TeamID|team_id|OID|1.2.840|com.apple" | sort -u > output/security_teamid.txt 2>&1 || true
-            strings -n 8 "$SEC_BIN" | sort -u > output/security_all_strings.txt 2>&1 || true
-          fi
-          
-          AMFI_BIN=$(find extracted_frameworks -type f -name "AppleMobileFileIntegrity" 2>/dev/null | head -1)
-          if [ -n "$AMFI_BIN" ]; then
-            echo "=== AppleMobileFileIntegrity ==="
-            nm -C -a "$AMFI_BIN" > output/amfi_symbols.txt 2>&1 || true
-            nm -gU "$AMFI_BIN" > output/amfi_exports.txt 2>&1 || true
-            strings "$AMFI_BIN" | grep -iE "coretrust|trustcache|cdhash|signature|verify|amfi|teamid|oid" | sort -u > output/amfi_trust_strings.txt 2>&1 || true
-            strings "$AMFI_BIN" | grep -iE "TeamID|team_id|OID|1.2.840|com.apple" | sort -u > output/amfi_teamid.txt 2>&1 || true
-            strings -n 8 "$AMFI_BIN" | sort -u > output/amfi_all_strings.txt 2>&1 || true
           fi
 
       - name: 上传分析结果
         uses: actions/upload-artifact@v4
         with:
-          name: full_analysis
+          name: valid_and_tips_analysis
           path: output/
           retention-days: 90
