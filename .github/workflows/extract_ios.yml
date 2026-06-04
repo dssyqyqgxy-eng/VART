@@ -22,6 +22,20 @@ jobs:
       - name: 创建输出目录
         run: mkdir -p output
 
+      - name: 诊断文件
+        run: |
+          echo "=== 根目录所有文件 ==="
+          ls -la
+          echo ""
+          echo "=== 搜索 tips ==="
+          find . -name "*tips*" -type f 2>/dev/null
+          echo ""
+          echo "=== 搜索 CodeSignature ==="
+          find . -name "*CodeSignature*" -type f 2>/dev/null
+          echo ""
+          echo "=== 搜索 txt 文件 ==="
+          find . -name "*.txt" -type f 2>/dev/null
+
       - name: 分析 valid.sqlite3
         run: |
           if [ -f valid.sqlite3 ]; then
@@ -51,21 +65,23 @@ jobs:
 
       - name: 分析 com.apple.tips 签名和证书
         run: |
-          if [ -f "com.apple.tips.app.txt" ]; then
+          TIPS_FILE=$(find . -name "*tips*" -type f 2>/dev/null | head -1)
+          if [ -n "$TIPS_FILE" ]; then
+            echo "找到文件: $TIPS_FILE"
             echo "=== 签名信息 ===" > output/tips_signature.txt
-            cat "com.apple.tips.app.txt" >> output/tips_signature.txt 2>&1
+            cat "$TIPS_FILE" >> output/tips_signature.txt 2>&1
             
-            grep -iE "TeamIdentifier|Authority|Identifier" "com.apple.tips.app.txt" > output/tips_teamid.txt || true
+            grep -iE "TeamIdentifier|Authority|Identifier" "$TIPS_FILE" > output/tips_teamid.txt || true
             
-            grep -E "OID|1.2.840|1.3.6.1" "com.apple.tips.app.txt" | head -100 > output/tips_oid.txt || true
+            grep -E "OID|1.2.840|1.3.6.1" "$TIPS_FILE" | head -100 > output/tips_oid.txt || true
             
-            grep -iE "Subject|Issuer|OU=" "com.apple.tips.app.txt" | head -50 > output/tips_cert_teamid.txt || true
+            grep -iE "Subject|Issuer|OU=" "$TIPS_FILE" | head -50 > output/tips_cert_teamid.txt || true
             
             cat output/tips_teamid.txt
             echo "---"
             cat output/tips_oid.txt | head -30
           else
-            echo "未找到 com.apple.tips.app.txt"
+            echo "未找到 tips 文件"
           fi
 
       - name: 上传分析结果
