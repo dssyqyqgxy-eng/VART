@@ -15,6 +15,8 @@ jobs:
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: 安装工具
         run: brew install sqlite
@@ -22,52 +24,34 @@ jobs:
       - name: 创建输出目录
         run: mkdir -p output
 
-      - name: 分析 valid.sqlite3
+      - name: 列出所有文件
         run: |
-          if [ -f valid.sqlite3 ]; then
-            echo "=== valid.sqlite3 ===" > output/valid_analysis.txt
-            sqlite3 valid.sqlite3 ".tables" >> output/valid_analysis.txt 2>&1
-            echo "" >> output/valid_analysis.txt
-            sqlite3 valid.sqlite3 ".schema" >> output/valid_analysis.txt 2>&1
-            
-            for TABLE in $(sqlite3 valid.sqlite3 ".tables" 2>/dev/null); do
-              echo "" >> output/valid_analysis.txt
-              echo "=== $TABLE 结构 ===" >> output/valid_analysis.txt
-              sqlite3 valid.sqlite3 "PRAGMA table_info($TABLE);" >> output/valid_analysis.txt 2>&1 || true
-              
-              echo "=== $TABLE 行数 ===" >> output/valid_analysis.txt
-              sqlite3 valid.sqlite3 "SELECT COUNT(*) FROM $TABLE;" >> output/valid_analysis.txt 2>&1 || true
-              
-              echo "=== $TABLE 数据 (hex) ===" >> output/valid_analysis.txt
-              sqlite3 valid.sqlite3 "SELECT * FROM $TABLE;" 2>/dev/null | head -100 | xxd | head -200 >> output/valid_analysis.txt || true
-            done
-            
-            sqlite3 valid.sqlite3 ".tables" 2>/dev/null | grep -qi "code" && sqlite3 valid.sqlite3 "SELECT hex(cdhash) FROM code LIMIT 50;" 2>/dev/null > output/valid_cdhash.txt || true
-            
-            sqlite3 valid.sqlite3 ".tables" 2>/dev/null | grep -qi "team" && sqlite3 valid.sqlite3 "SELECT * FROM team;" 2>/dev/null | strings | head -100 > output/valid_team.txt || true
-            
-            cat output/valid_analysis.txt | head -200
-          fi
+          echo "=== 所有文件 ==="
+          ls -la
+          echo ""
+          echo "=== com.apple* ==="
+          ls com.apple* 2>/dev/null || echo "未找到 com.apple*"
 
       - name: 分析 com.apple.tips.txt
         run: |
-          if [ -f "com.apple.tips.txt" ]; then
-            echo "=== TeamID ===" > output/tips_teamid.txt
-            grep -iE "TeamIdentifier|Authority|Identifier" "com.apple.tips.txt" >> output/tips_teamid.txt || true
-            
-            echo "=== OID ===" > output/tips_oid.txt
-            grep -E "OID|1.2.840|1.3.6.1" "com.apple.tips.txt" | head -100 >> output/tips_oid.txt || true
-            
-            echo "=== 证书信息 ===" > output/tips_cert.txt
-            grep -iE "Subject|Issuer|OU=" "com.apple.tips.txt" | head -50 >> output/tips_cert.txt || true
-            
+          TIPS_FILE=$(ls com.apple.tips.txt 2>/dev/null || ls com.apple.tips* 2>/dev/null | head -1)
+          if [ -n "$TIPS_FILE" ]; then
+            echo "找到: $TIPS_FILE"
+            grep -iE "TeamIdentifier|Authority|Identifier" "$TIPS_FILE" > output/tips_teamid.txt || true
+            grep -E "OID|1.2.840|1.3.6.1" "$TIPS_FILE" | head -100 > output/tips_oid.txt || true
+            grep -iE "Subject|Issuer|OU=" "$TIPS_FILE" | head -50 > output/tips_cert.txt || true
             cat output/tips_teamid.txt
-            echo "---"
-            cat output/tips_oid.txt | head -30
-            echo "---"
-            cat output/tips_cert.txt
           else
-            echo "未找到 com.apple.tips.txt"
+            echo "未找到文件"
+            ls -la
+          fi
+
+      - name: 分析 valid.sqlite3
+        run: |
+          if [ -f valid.sqlite3 ]; then
+            sqlite3 valid.sqlite3 ".tables" > output/valid_tables.txt 2>&1
+            sqlite3 valid.sqlite3 ".schema" > output/valid_schema.txt 2>&1
+            cat output/valid_tables.txt
           fi
 
       - name: 上传分析结果
