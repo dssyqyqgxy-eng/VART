@@ -1,0 +1,186 @@
+name: 提取 TrustCache AppleImage4 AMFI KEXT
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: macos-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装工具
+        run: |
+          brew install lzfse binutils
+          brew tap blacktop/tap && brew install ipsw
+
+      - name: 创建输出目录
+        run: mkdir -p output/{kernel,trustcache,appleimage4,amfi,kexts,reports}
+
+      - name: 下载 IPSW
+        run: |
+          curl -L -o firmware.ipsw "https://updates.cdn-apple.com/2026WinterFCS/fullrestores/047-83292/FC308431-84C0-4001-9A24-09FC77486C76/iPhone11,2,iPhone11,4,iPhone11,6_18.7.6_22H320_Restore.ipsw"
+
+      - name: 提取 TrustCache 文件
+        run: |
+          echo "=== 从文件系统提取 TrustCache ==="
+          ipsw extract --files --pattern 'TrustCache' -o output/trustcache firmware.ipsw 2>&1 || true
+          ipsw extract --files --pattern 'trustcache' -o output/trustcache firmware.ipsw 2>&1 || true
+          ipsw extract --files --pattern 'StaticTrustCache' -o output/trustcache firmware.ipsw 2>&1 || true
+          ipsw extract --files --pattern 'trustd' -o output/trustcache firmware.ipsw 2>&1 || true
+          
+          echo "=== 提取 AppleImage4 ==="
+          ipsw extract --files --pattern 'AppleImage4' -o output/appleimage4 firmware.ipsw 2>&1 || true
+          
+          echo "=== 提取 AMFI 相关 ==="
+          ipsw extract --files --pattern 'AMFI' -o output/amfi firmware.ipsw 2>&1 || true
+          ipsw extract --files --pattern 'AppleMobileFileIntegrity' -o output/amfi firmware.ipsw 2>&1 || true
+
+      - name: 准备内核缓存
+        run: |
+          KERNELCACHE=$(find . -name "kernelcache*" -type f ! -name "*.txt" ! -name "*.md" 2>/dev/null | head -1)
+          if [ -z "$KERNELCACHE" ]; then
+            echo "=== 从 IPSW 提取内核 ==="
+            ipsw extract --kernel -o output/kernel firmware.ipsw
+            KERNELCACHE=$(find output/kernel -name "kernelcache*" -type f 2>/dev/null | head -1)
+          fi
+          
+          if [ -n "$KERNELCACHE" ]; then
+            echo "内核文件: $KERNELCACHE"
+            file "$KERNELCACHE"
+            
+            if file "$KERNELCACHE" | grep -q "lzfse"; then
+              lzfse -decode -i "$KERNELCACHE" -o output/kernel/kernelcache.dec
+            elif file "$KERNELCACHE" | grep -q "img4"; then
+              ipsw img4 extract --im4p -o output/kernel "$KERNELCACHE" 2>&1 || true
+              if [ -f output/kernel/payload ]; then
+                mv output/kernel/payload output/kernel/kernelcache.dec
+              fi
+            else
+              cp "$KERNELCACHE" output/kernel/kernelcache.dec
+            fi
+            
+            echo "KERNEL_TARGET=output/kernel/kernelcache.dec" >> $GITHUB_ENV
+            ls -lh output/kernel/kernelcache.dec
+          fi
+
+      - name: 提取内核扩展 KEXT
+        run: |
+          if [ -n "$KERNEL_TARGET" ] && [ -f "$KERNEL_TARGET" ]; then
+            echo "=== 列出所有 KEXT ==="
+            ipsw kernel kexts "$KERNEL_TARGET" > output/kexts/all_kexts.txt 2>&1 || true
+            ipsw kernel kexts "$KERNEL_TARGET" -j > output/kexts/all_kexts.json 2>&1 || true
+            
+            echo "=== 搜索 AMFI KEXT ==="
+            cat output/kexts/all_kexts.txt | grep -iE "amfi|AppleMobileFileIntegrity" || echo "未找到"
+            
+            echo "=== 搜索 TrustCache KEXT ==="
+            cat output/kexts/all_kexts.txt | grep -iE "trustcache|TrustCache" || echo "未找到"
+            
+            echo "=== 搜索 Image4 KEXT ==="
+            cat output/kexts/all_kexts.txt | grep -iE "image4|Image4|appleimage4" || echo "未找到"
+            
+            echo "=== 所有 KEXT ==="
+            cat output/kexts/all_kexts.txt | head -100
+          fi
+
+      - name: 搜索 AppleImage4 在内核中的代码
+        run: |
+          if [ -n "$KERNEL_TARGET" ] && [ -f "$KERNEL_TARGET" ]; then
+            echo "=== AppleImage4 字符串 ==="
+            strings -t x "$KERNEL_TARGET" | grep -iE "AppleImage4|appleimage4|Image4" > output/appleimage4/strings.txt 2>&1 || true
+            
+            echo "=== IMG4/IM4P 字符串 ==="
+            strings -t x "$KERNEL_TARGET" | grep -iE "IMG4|IM4P|im4p_verify|im4p_parse|im4p_create|im4m|im4r|im4p_build" > output/appleimage4/img4_strings.txt 2>&1 || true
+            
+            echo "=== IMG4 交叉引用 ==="
+            python3 -c "
+import subprocess
+result = subprocess.run(['strings', '-t', 'x', '$KERNEL_TARGET'], capture_output=True, text=True)
+lines = [l for l in result.stdout.split('\n') if 'IMG4' in l or 'im4p' in l.lower()]
+for l in lines[:50]:
+    print(l)
+" > output/appleimage4/img4_detailed.txt 2>&1 || true
+            
+            echo "=== 搜索 IMG4 函数入口 ==="
+            strings -t x "$KERNEL_TARGET" | grep -E "img4_|im4p_|image4_" > output/appleimage4/img4_functions.txt 2>&1 || true
+            
+            cat output/appleimage4/strings.txt
+            echo "---"
+            cat output/appleimage4/img4_strings.txt
+          fi
+
+      - name: 搜索 TrustCache 在内核中的完整代码
+        run: |
+          if [ -n "$KERNEL_TARGET" ] && [ -f "$KERNEL_TARGET" ]; then
+            echo "=== TrustCache 所有字符串 ==="
+            strings -t x "$KERNEL_TARGET" | grep -iE "trustcache|TrustCache|trust_cache|trustcache_add|trustcache_remove|trustcache_check|trustcache_lookup|trustcache_load|trustcache_get|trustcache_create|trustcache_init|trustcache_query|trustcache_runtime" > output/trustcache/kernel_strings.txt 2>&1 || true
+            
+            echo "=== TrustCache 交叉引用 ==="
+            strings -t x "$KERNEL_TARGET" | grep -B2 -A2 "trustcache" > output/trustcache/context.txt 2>&1 || true
+            
+            echo "=== TrustCache 候选函数 ==="
+            strings -t x "$KERNEL_TARGET" | grep -E "trustcache_[a-z_]+" | sort -u > output/trustcache/functions.txt 2>&1 || true
+            
+            cat output/trustcache/kernel_strings.txt
+          fi
+
+      - name: 搜索 AMFI 在内核中的代码
+        run: |
+          if [ -n "$KERNEL_TARGET" ] && [ -f "$KERNEL_TARGET" ]; then
+            echo "=== AMFI 字符串 ==="
+            strings -t x "$KERNEL_TARGET" | grep -iE "AMFI|amfi_|_amfi|amfi_check|amfi_verify|amfi_allow|amfi_deny|AppleMobileFileIntegrity" > output/amfi/kernel_strings.txt 2>&1 || true
+            
+            echo "=== AMFI 函数 ==="
+            strings -t x "$KERNEL_TARGET" | grep -E "amfi_[a-z_]+|_amfi[a-z_]*" | sort -u > output/amfi/functions.txt 2>&1 || true
+            
+            cat output/amfi/kernel_strings.txt
+          fi
+
+      - name: 提取 TrustCache 内核扩展
+        run: |
+          if [ -n "$KERNEL_TARGET" ] && [ -f "$KERNEL_TARGET" ]; then
+            echo "=== 尝试提取 AMFI 相关 KEXT ==="
+            KEXT_LIST=$(ipsw kernel kexts "$KERNEL_TARGET" 2>/dev/null | grep -iE "amfi|trust|image4|sandbox" || true)
+            
+            if [ -n "$KEXT_LIST" ]; then
+              echo "$KEXT_LIST" | while read KEXT; do
+                echo "提取: $KEXT"
+                # ipsw 可能支持指定 kext 提取
+              done
+            fi
+            
+            echo "=== KEXT 列表 ==="
+            echo "$KEXT_LIST"
+            echo "$KEXT_LIST" > output/kexts/target_kexts.txt
+          fi
+
+      - name: 生成报告
+        run: |
+          echo "# iOS 18.7.6 TrustCache / AppleImage4 / AMFI 提取报告" > output/reports/EXTRACT_REPORT.md
+          echo "" >> output/reports/EXTRACT_REPORT.md
+          echo "## TrustCache" >> output/reports/EXTRACT_REPORT.md
+          cat output/trustcache/kernel_strings.txt >> output/reports/EXTRACT_REPORT.md 2>/dev/null || echo "未找到" >> output/reports/EXTRACT_REPORT.md
+          echo "" >> output/reports/EXTRACT_REPORT.md
+          echo "## AppleImage4/IMG4" >> output/reports/EXTRACT_REPORT.md
+          cat output/appleimage4/strings.txt >> output/reports/EXTRACT_REPORT.md 2>/dev/null || echo "未找到" >> output/reports/EXTRACT_REPORT.md
+          echo "" >> output/reports/EXTRACT_REPORT.md
+          echo "## AMFI" >> output/reports/EXTRACT_REPORT.md
+          cat output/amfi/kernel_strings.txt >> output/reports/EXTRACT_REPORT.md 2>/dev/null || echo "未找到" >> output/reports/EXTRACT_REPORT.md
+          echo "" >> output/reports/EXTRACT_REPORT.md
+          echo "## KEXT 列表" >> output/reports/EXTRACT_REPORT.md
+          cat output/kexts/all_kexts.txt >> output/reports/EXTRACT_REPORT.md 2>/dev/null || echo "未找到" >> output/reports/EXTRACT_REPORT.md
+
+      - name: 上传
+        uses: actions/upload-artifact@v4
+        with:
+          name: trustcache_appleimage4_amfi
+          path: output/
+          retention-days: 90
