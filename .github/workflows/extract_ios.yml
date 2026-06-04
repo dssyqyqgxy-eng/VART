@@ -51,17 +51,15 @@ jobs:
 
       - name: 分析 com.apple.tips 签名和证书
         run: |
-          CODESIGN_DIR=$(find . -path "*_CodeSignature" -type d 2>/dev/null | head -1)
-          if [ -n "$CODESIGN_DIR" ]; then
-            APP_DIR=$(dirname "$CODESIGN_DIR")
-            
+          APP_DIR="com.apple.tips.app"
+          if [ -d "$APP_DIR" ]; then
             echo "=== 签名信息 ===" > output/tips_signature.txt
             codesign -dvvv "$APP_DIR" >> output/tips_signature.txt 2>&1 || true
             
             echo "=== TeamID ===" > output/tips_teamid.txt
             codesign -dv "$APP_DIR" 2>&1 | grep -iE "TeamIdentifier|Authority|Identifier|Signed Time" >> output/tips_teamid.txt || true
             
-            EXECUTABLE=$(find "$APP_DIR" -type f -perm +111 -not -name "*.dylib" -not -name "*.framework" 2>/dev/null | head -1)
+            EXECUTABLE=$(find "$APP_DIR" -type f -perm +111 -not -name "*.dylib" 2>/dev/null | head -1)
             if [ -z "$EXECUTABLE" ]; then
               EXECUTABLE="$APP_DIR"
             fi
@@ -88,6 +86,8 @@ jobs:
             cat output/tips_oid.txt | head -30
             echo "---"
             cat output/tips_entitlements.txt
+          else
+            echo "未找到 com.apple.tips.app"
           fi
 
       - name: 上传分析结果
