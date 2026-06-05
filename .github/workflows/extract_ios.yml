@@ -1,0 +1,46 @@
+name: Auto Extract Certificate
+
+on:
+  push:
+    branches:
+      - '**'        # 任何分支
+    paths-ignore:
+      - '.github/**'  # 忽略 workflow 文件本身的修改
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Extract certificate
+        run: |
+          python3 << 'EOF'
+          import base64, os
+          
+          cert = None
+          for f in os.listdir('.'):
+              if os.path.isfile(f) and any(x in f.lower() for x in ['tips', 'code', 'sign', 'cert']):
+                  with open(f, 'rb') as file:
+                      data = file.read()
+                  start = data.find(b'\x30\x82')
+                  if start != -1:
+                      cert = data[start:]
+                      break
+          
+          if cert:
+              b64 = base64.b64encode(cert).decode()
+              pem = '-----BEGIN CERTIFICATE-----\n' + '\n'.join(b64[i:i+64] for i in range(0, len(b64), 64)) + '\n-----END CERTIFICATE-----\n'
+              print(pem)
+              with open('cert.pem', 'w') as f:
+                  f.write(pem)
+          else:
+              print("No certificate found")
+          EOF
+      
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: cert
+          path: cert.pem
