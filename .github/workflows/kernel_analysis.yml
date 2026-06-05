@@ -1,0 +1,91 @@
+name: Extract Certificate from Binary
+
+on:
+  push:
+    paths:
+      - 'com.apple.tips.txt'
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Extract certificate from binary
+        run: |
+          python3 << 'EOF'
+          import base64
+          import os
+          
+          # 读取二进制文件
+          with open('com.apple.tips.txt', 'rb') as f:
+              data = f.read()
+          
+          # 方法1：搜索 DER 证书起始标记 (0x30 0x82)
+          start = data.find(b'\x30\x82')
+          
+          if start == -1:
+              # 方法2：搜索 PEM 格式
+              if b'-----BEGIN CERTIFICATE-----' in data:
+                  start = data.find(b'-----BEGIN CERTIFICATE-----')
+                  end = data.find(b'-----END CERTIFICATE-----') + 25
+                  cert_data = data[start:end]
+                  is_pem = True
+              else:
+                  print("未找到证书")
+                  exit(1)
+          else:
+              # 提取 DER 证书
+              cert_data = data[start:]
+              is_pem = False
+          
+          # 保存证书
+          if is_pem:
+              with open('certificate.pem', 'wb') as f:
+                  f.write(cert_data)
+              print("已提取 PEM 证书")
+          else:
+              with open('certificate.der', 'wb') as f:
+                  f.write(cert_data)
+              print(f"已提取 DER 证书，大小: {len(cert_data)} 字节")
+              
+              # 转换为 PEM (Base64)
+              b64 = base64.b64encode(cert_data).decode()
+              pem = '-----BEGIN CERTIFICATE-----\n'
+              pem += '\n'.join(b64[i:i+64] for i in range(0, len(b64), 64))
+              pem += '\n-----END CERTIFICATE-----\n'
+              with open('certificate.pem', 'w') as f:
+                  f.write(pem)
+              print("已转换为 PEM 格式")
+          EOF
+      
+      - name: Display certificate info
+        run: |
+          if [ -f certificate.pem ]; then
+            echo "=== 证书内容 (PEM) ==="
+            cat certificate.pem
+            echo ""
+            echo "=== 证书 OID 信息 ==="
+            openssl x509 -in certificate.pem -text -noout | grep -E "([0-9]+\.)+[0-9]+" || echo "请安装 openssl"
+          fi
+      
+      - name: Upload certificate as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: extracted-certificate
+          path: |
+            certificate.pem
+            certificate.der
+          compression-level: 0
+      
+      - name: Upload to workflow summary
+        run: |
+          if [ -f certificate.pem ]; then
+            echo "### 提取的证书" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat certificate.pem >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
