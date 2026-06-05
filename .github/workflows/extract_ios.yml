@@ -29,16 +29,13 @@ jobs:
           if [ -f valid.sqlite3 ]; then
             echo "=== 表列表 ===" > output/sqlite/tables.txt
             sqlite3 valid.sqlite3 ".tables" >> output/sqlite/tables.txt 2>&1
-            
             echo "=== 完整结构 ===" > output/sqlite/schema.txt
             sqlite3 valid.sqlite3 ".schema" >> output/sqlite/schema.txt 2>&1
-            
             for TABLE in $(sqlite3 valid.sqlite3 ".tables" 2>/dev/null); do
               echo "=== $TABLE ===" >> output/sqlite/all_data.txt
               sqlite3 valid.sqlite3 "PRAGMA table_info($TABLE);" >> output/sqlite/all_data.txt 2>&1
               sqlite3 valid.sqlite3 "SELECT * FROM $TABLE;" 2>/dev/null | xxd | head -200 >> output/sqlite/all_data.txt
             done
-            
             sqlite3 valid.sqlite3 ".tables" 2>/dev/null | grep -qi "code" && sqlite3 valid.sqlite3 "SELECT hex(cdhash) FROM code LIMIT 50;" 2>/dev/null > output/sqlite/cdhash.txt || true
             sqlite3 valid.sqlite3 ".tables" 2>/dev/null | grep -qi "team" && sqlite3 valid.sqlite3 "SELECT * FROM team;" 2>/dev/null | strings | head -100 > output/sqlite/team.txt || true
           fi
@@ -49,34 +46,25 @@ jobs:
             strings "com.apple.tips.txt" | grep -iE "TeamIdentifier|Authority|Identifier" > output/tips_txt/teamid.txt || true
             strings "com.apple.tips.txt" | grep -E "OID|1.2.840|1.3.6.1" | head -100 > output/tips_txt/oid.txt || true
             strings "com.apple.tips.txt" | grep -iE "Subject|Issuer|OU=|CN=" | head -100 > output/tips_txt/cert.txt || true
-            strings "com.apple.tips.txt" > output/tips_txt/all_strings.txt || true
           fi
 
       - name: 下载 IPSW 并提取 Tips.app
         run: |
           curl -L -o firmware.ipsw "https://updates.cdn-apple.com/2026WinterFCS/fullrestores/047-83292/FC308431-84C0-4001-9A24-09FC77486C76/iPhone11,2,iPhone11,4,iPhone11,6_18.7.6_22H320_Restore.ipsw"
           
-          echo "=== 提取 Tips.app ==="
-          ipsw extract --files --pattern 'Tips.app/' -o output/tips_app firmware.ipsw 2>&1 || true
-          ipsw extract --files --pattern 'Tips\.app/' -o output/tips_app firmware.ipsw 2>&1 || true
-          ipsw extract --files --pattern 'Tips' -o output/tips_app firmware.ipsw 2>&1 || true
+          echo "=== 从 System/Library/Applications 提取 Tips.app ==="
+          ipsw extract --files --pattern 'System/Library/Applications/Tips.app/' -o output/tips_app firmware.ipsw 2>&1 || true
           
           echo "=== 提取结果 ==="
           find output/tips_app -type d 2>/dev/null
           find output/tips_app -type f -name "Tips" 2>/dev/null
-          find output/tips_app -name "*.app" -type d 2>/dev/null
 
       - name: 分析固件中的 Tips.app
         run: |
           APP_DIR=$(find output/tips_app -name "Tips.app" -type d 2>/dev/null | head -1)
-          if [ -z "$APP_DIR" ]; then
-            APP_DIR=$(find output/tips_app -name "*.app" -type d 2>/dev/null | head -1)
-          fi
           
           if [ -n "$APP_DIR" ] && [ -d "$APP_DIR" ]; then
             echo "=== 找到 Tips.app: $APP_DIR ==="
-            
-            ls -la "$APP_DIR" > output/tips_app/directory.txt 2>&1
             
             codesign -dvvv "$APP_DIR" > output/tips_app/signature.txt 2>&1 || true
             
@@ -85,14 +73,11 @@ jobs:
             codesign -d --entitlements - "$APP_DIR" > output/tips_app/entitlements.txt 2>&1 || true
             
             EXECUTABLE=$(find "$APP_DIR" -type f -name "Tips" 2>/dev/null | head -1)
-            if [ -z "$EXECUTABLE" ]; then
-              EXECUTABLE="$APP_DIR"
+            if [ -n "$EXECUTABLE" ]; then
+              security cms -D -i "$EXECUTABLE" > output/tips_app/cms.txt 2>&1 || true
+              grep -E "OID|1.2.840|1.3.6.1" output/tips_app/cms.txt 2>/dev/null | head -100 > output/tips_app/oid.txt || true
+              grep -iE "Subject|Issuer|OU=" output/tips_app/cms.txt 2>/dev/null | head -50 > output/tips_app/cert.txt || true
             fi
-            
-            security cms -D -i "$EXECUTABLE" > output/tips_app/cms.txt 2>&1 || true
-            
-            grep -E "OID|1.2.840|1.3.6.1" output/tips_app/cms.txt 2>/dev/null | head -100 > output/tips_app/oid.txt || true
-            grep -iE "Subject|Issuer|OU=" output/tips_app/cms.txt 2>/dev/null | head -50 > output/tips_app/cert.txt || true
             
             cat output/tips_app/teamid.txt
             echo "---"
