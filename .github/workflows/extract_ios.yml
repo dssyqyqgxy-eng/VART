@@ -1,4 +1,4 @@
-name: 分析 valid.sqlite3 和 com.apple.tips
+name: 分析 valid.sqlite3 和 Tips.app
 
 on:
   push:
@@ -22,7 +22,7 @@ jobs:
           brew tap blacktop/tap && brew install ipsw
 
       - name: 创建输出目录
-        run: mkdir -p output/{sqlite,tips,app}
+        run: mkdir -p output/{sqlite,tips_txt,tips_app}
 
       - name: 分析 valid.sqlite3
         run: |
@@ -46,51 +46,59 @@ jobs:
       - name: 分析 com.apple.tips.txt
         run: |
           if [ -f "com.apple.tips.txt" ]; then
-            strings "com.apple.tips.txt" | grep -iE "TeamIdentifier|Authority|Identifier" > output/tips/teamid.txt || true
-            strings "com.apple.tips.txt" | grep -E "OID|1.2.840|1.3.6.1" | head -100 > output/tips/oid.txt || true
-            strings "com.apple.tips.txt" | grep -iE "Subject|Issuer|OU=|CN=" | head -100 > output/tips/cert.txt || true
-            strings "com.apple.tips.txt" > output/tips/all_strings.txt || true
+            strings "com.apple.tips.txt" | grep -iE "TeamIdentifier|Authority|Identifier" > output/tips_txt/teamid.txt || true
+            strings "com.apple.tips.txt" | grep -E "OID|1.2.840|1.3.6.1" | head -100 > output/tips_txt/oid.txt || true
+            strings "com.apple.tips.txt" | grep -iE "Subject|Issuer|OU=|CN=" | head -100 > output/tips_txt/cert.txt || true
+            strings "com.apple.tips.txt" > output/tips_txt/all_strings.txt || true
           fi
 
-      - name: 下载 IPSW 并提取 com.apple.tips.app
+      - name: 下载 IPSW 并提取 Tips.app
         run: |
           curl -L -o firmware.ipsw "https://updates.cdn-apple.com/2026WinterFCS/fullrestores/047-83292/FC308431-84C0-4001-9A24-09FC77486C76/iPhone11,2,iPhone11,4,iPhone11,6_18.7.6_22H320_Restore.ipsw"
           
-          echo "=== 提取 com.apple.tips.app ==="
-          ipsw extract --files --pattern 'com.apple.tips.app/' -o output/app firmware.ipsw 2>&1 || true
-          ipsw extract --files --pattern 'com.apple.tips' -o output/app firmware.ipsw 2>&1 || true
+          echo "=== 提取 Tips.app ==="
+          ipsw extract --files --pattern 'Tips.app/' -o output/tips_app firmware.ipsw 2>&1 || true
+          ipsw extract --files --pattern 'Tips\.app/' -o output/tips_app firmware.ipsw 2>&1 || true
+          ipsw extract --files --pattern 'Tips' -o output/tips_app firmware.ipsw 2>&1 || true
           
           echo "=== 提取结果 ==="
-          find output/app -type f 2>/dev/null | head -50
-          find output/app -type d 2>/dev/null | head -50
+          find output/tips_app -type d 2>/dev/null
+          find output/tips_app -type f -name "Tips" 2>/dev/null
+          find output/tips_app -name "*.app" -type d 2>/dev/null
 
-      - name: 分析固件中的 com.apple.tips.app
+      - name: 分析固件中的 Tips.app
         run: |
-          APP_DIR=$(find output/app -name "*.app" -type d 2>/dev/null | head -1)
+          APP_DIR=$(find output/tips_app -name "Tips.app" -type d 2>/dev/null | head -1)
           if [ -z "$APP_DIR" ]; then
-            APP_DIR=$(find output/app -type d -name "*Tips*" 2>/dev/null | head -1)
+            APP_DIR=$(find output/tips_app -name "*.app" -type d 2>/dev/null | head -1)
           fi
           
-          if [ -n "$APP_DIR" ]; then
-            echo "=== 找到 App: $APP_DIR ==="
+          if [ -n "$APP_DIR" ] && [ -d "$APP_DIR" ]; then
+            echo "=== 找到 Tips.app: $APP_DIR ==="
             
-            codesign -dvvv "$APP_DIR" > output/app/signature.txt 2>&1 || true
+            ls -la "$APP_DIR" > output/tips_app/directory.txt 2>&1
             
-            codesign -dv "$APP_DIR" 2>&1 | grep -iE "TeamIdentifier|Authority|Identifier" > output/app/teamid.txt || true
+            codesign -dvvv "$APP_DIR" > output/tips_app/signature.txt 2>&1 || true
             
-            security cms -D -i "$APP_DIR" > output/app/cms.txt 2>&1 || true
+            codesign -dv "$APP_DIR" 2>&1 | grep -iE "TeamIdentifier|Authority|Identifier" > output/tips_app/teamid.txt || true
             
-            grep -E "OID|1.2.840|1.3.6.1" output/app/cms.txt 2>/dev/null | head -100 > output/app/oid.txt || true
+            codesign -d --entitlements - "$APP_DIR" > output/tips_app/entitlements.txt 2>&1 || true
             
-            grep -iE "Subject|Issuer|OU=" output/app/cms.txt 2>/dev/null | head -50 > output/app/cert.txt || true
+            EXECUTABLE=$(find "$APP_DIR" -type f -name "Tips" 2>/dev/null | head -1)
+            if [ -z "$EXECUTABLE" ]; then
+              EXECUTABLE="$APP_DIR"
+            fi
             
-            codesign -d --entitlements - "$APP_DIR" > output/app/entitlements.txt 2>&1 || true
+            security cms -D -i "$EXECUTABLE" > output/tips_app/cms.txt 2>&1 || true
             
-            cat output/app/teamid.txt
+            grep -E "OID|1.2.840|1.3.6.1" output/tips_app/cms.txt 2>/dev/null | head -100 > output/tips_app/oid.txt || true
+            grep -iE "Subject|Issuer|OU=" output/tips_app/cms.txt 2>/dev/null | head -50 > output/tips_app/cert.txt || true
+            
+            cat output/tips_app/teamid.txt
             echo "---"
-            cat output/app/oid.txt | head -30
+            cat output/tips_app/oid.txt | head -30
           else
-            echo "未找到 App 目录"
+            echo "未找到 Tips.app"
           fi
 
       - name: 上传分析结果
