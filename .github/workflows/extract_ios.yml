@@ -53,7 +53,7 @@ jobs:
           curl -L -o firmware.ipsw "https://updates.cdn-apple.com/2026WinterFCS/fullrestores/047-83292/FC308431-84C0-4001-9A24-09FC77486C76/iPhone11,2,iPhone11,4,iPhone11,6_18.7.6_22H320_Restore.ipsw"
           
           echo "=== 从 System/Library/Applications 提取 Tips.app ==="
-          ipsw extract --files --pattern 'System/Applications/Tips.app/' -o output/tips_app firmware.ipsw 2>&1 || true
+          ipsw extract --files --pattern 'Applications/Tips.app/' -o output/tips_app firmware.ipsw 2>&1 || true
           
           echo "=== 提取结果 ==="
           find output/tips_app -type d 2>/dev/null
