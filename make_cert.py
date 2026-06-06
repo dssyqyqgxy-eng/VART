@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Tips.app 完整证书链克隆生成器
-- 根证书、中间证书、叶子证书都包含 Apple 私有 OID
-- 统一有效期: 2020-01-01 ~ 9999-12-31
+"""Tips.app 完整证书链生成器
+- 根证书: .cer + .key
+- 中间证书: .cer + .key
+- 叶子证书: .cer + .key + .p12（包含完整证书链）
+- 有效期: 2020-01-01 ~ 9999-12-31
 - 固定序列号（根: 0x02, 中间: 0x0121, 叶子: 原值）
-- 输出: PEM 证书 + 私钥 + P12（密码: 1）
+- P12 密码: 1
 """
 import datetime, os, sys
 from cryptography import x509
@@ -39,13 +41,13 @@ OID_WWDR = ObjectIdentifier("1.2.840.113635.100.6.2.1")
 OID_INTEG = ObjectIdentifier("1.2.840.113635.100.6.3.1")
 OID_SEC_BOOT = ObjectIdentifier("1.2.840.113635.100.6.3.2")
 
-# 可见平台 OID
+# 可见平台 OID（仅叶子证书）
 VISIBLE_PLATFORM_OIDS = [
     ObjectIdentifier(f"1.2.840.113635.100.6.1.{i}") 
     for i in range(1, 11)
 ]
 
-# 隐藏 OID
+# 隐藏 OID（所有证书）
 HIDDEN_OIDS = [
     "1.2.840.113635.100.1.115",
     "1.2.840.113635.100.6.86",
@@ -65,8 +67,8 @@ HIDDEN_OIDS = [
 def gen_key(bits=2048):
     return rsa.generate_private_key(65537, bits, default_backend())
 
-def add_apple_extensions(builder, include_platform=True):
-    """添加 Apple 私有扩展（值为 NULL）"""
+def add_common_apple_extensions(builder):
+    """添加所有证书共有的 Apple 私有扩展（值为 NULL）"""
     builder = builder.add_extension(
         x509.UnrecognizedExtension(OID_SOFTWARE_SIGNING, b'\x05\x00'), critical=False)
     builder = builder.add_extension(
@@ -75,38 +77,35 @@ def add_apple_extensions(builder, include_platform=True):
         x509.UnrecognizedExtension(OID_INTEG, b'\x05\x00'), critical=False)
     builder = builder.add_extension(
         x509.UnrecognizedExtension(OID_SEC_BOOT, b'\x05\x00'), critical=False)
-    
     for oid_str in HIDDEN_OIDS:
         builder = builder.add_extension(
             x509.UnrecognizedExtension(ObjectIdentifier(oid_str), b'\x05\x00'), critical=False)
-    
-    if include_platform:
-        for oid in VISIBLE_PLATFORM_OIDS:
-            builder = builder.add_extension(
-                x509.UnrecognizedExtension(oid, b'\x05\x00'), critical=False)
-    
+    return builder
+
+def add_leaf_platform_extensions(builder):
+    """添加叶子证书特有的平台 OID"""
+    for oid in VISIBLE_PLATFORM_OIDS:
+        builder = builder.add_extension(
+            x509.UnrecognizedExtension(oid, b'\x05\x00'), critical=False)
     return builder
 
 def save_cert_and_key(cert, key, name):
-    """保存证书和私钥"""
+    """保存证书（PEM）和私钥（PEM）"""
     with open(os.path.join(OUTPUT_DIR, f"{name}.cer"), "wb") as f:
         f.write(cert.public_bytes(serialization.Encoding.PEM))
-    with open(os.path.join(OUTPUT_DIR, f"{name}.der"), "wb") as f:
-        f.write(cert.public_bytes(serialization.Encoding.DER))
     with open(os.path.join(OUTPUT_DIR, f"{name}.key"), "wb") as f:
         f.write(key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption()
         ))
-    print(f"✅ {name}.cer / .der / .key")
+    print(f"✅ {name}.cer / .key")
 
 # ============================================================
 # 1. 根证书
 # ============================================================
 print("=" * 60)
-print("Tips.app 完整克隆证书链")
-print(f"有效期: 2020-01-01 ~ 9999-12-31")
+print("生成证书链")
 print("=" * 60)
 
 root_key = gen_key()
@@ -139,7 +138,7 @@ root_builder = root_builder.add_extension(
         x509.PolicyInformation(OID_APPLE_POLICY_5_1, policy_qualifiers=None),
     ]), critical=False)
 
-root_builder = add_apple_extensions(root_builder, include_platform=False)
+root_builder = add_common_apple_extensions(root_builder)
 
 root_cert = root_builder.sign(root_key, hashes.SHA256(), default_backend())
 save_cert_and_key(root_cert, root_key, "Apple_Root_CA")
@@ -180,7 +179,7 @@ intermediate_builder = intermediate_builder.add_extension(
         x509.PolicyInformation(OID_APPLE_POLICY_5_1, policy_qualifiers=None),
     ]), critical=False)
 
-intermediate_builder = add_apple_extensions(intermediate_builder, include_platform=False)
+intermediate_builder = add_common_apple_extensions(intermediate_builder)
 
 intermediate_cert = intermediate_builder.sign(root_key, hashes.SHA256(), default_backend())
 save_cert_and_key(intermediate_cert, intermediate_key, "Apple_Code_Signing_CA")
@@ -222,7 +221,7 @@ leaf_builder = leaf_builder.add_extension(
 leaf_builder = leaf_builder.add_extension(
     x509.AuthorityKeyIdentifier.from_issuer_public_key(intermediate_key.public_key()), critical=False)
 
-# 修复：notice_numbers 需要是一个列表，不能是 None
+# 策略 OID（带 User Notice）
 user_notice_text = "This certificate is to be used exclusively for functions internal to Apple Products and/or Apple processes."
 leaf_builder = leaf_builder.add_extension(
     x509.CertificatePolicies([
@@ -237,6 +236,7 @@ leaf_builder = leaf_builder.add_extension(
         ),
     ]), critical=False)
 
+# CRL 分发点
 leaf_builder = leaf_builder.add_extension(
     x509.CRLDistributionPoints([
         x509.DistributionPoint(
@@ -245,15 +245,17 @@ leaf_builder = leaf_builder.add_extension(
         )
     ]), critical=False)
 
-leaf_builder = add_apple_extensions(leaf_builder, include_platform=True)
+# 添加 Apple 私有扩展（基础 + 平台）
+leaf_builder = add_common_apple_extensions(leaf_builder)
+leaf_builder = add_leaf_platform_extensions(leaf_builder)
 
 leaf_cert = leaf_builder.sign(intermediate_key, hashes.SHA256(), default_backend())
 save_cert_and_key(leaf_cert, leaf_key, "Software_Signing_Tips_Clone")
 
 # ============================================================
-# 4. 生成 P12
+# 4. 叶子证书的 P12（包含完整证书链）
 # ============================================================
-print("\n>>> 生成 P12（包含私钥和完整证书链）")
+print("\n>>> 生成叶子证书 P12（包含完整证书链）")
 leaf_name = "Software_Signing_Tips_Clone"
 p12_data = pkcs12.serialize_key_and_certificates(
     leaf_name.encode(),
@@ -278,7 +280,7 @@ print(f"  中间证书:     0x{INTERMEDIATE_SERIAL:04X}")
 print(f"  叶子证书:     0x{LEAF_SERIAL:016X}")
 print(f"\n有效期: 2020-01-01 ~ 9999-12-31")
 print(f"\n输出文件:")
-print(f"  Apple_Root_CA.cer / .der / .key")
-print(f"  Apple_Code_Signing_CA.cer / .der / .key")
-print(f"  Software_Signing_Tips_Clone.cer / .der / .key / .p12")
+print(f"  Apple_Root_CA.cer / .key")
+print(f"  Apple_Code_Signing_CA.cer / .key")
+print(f"  Software_Signing_Tips_Clone.cer / .key / .p12")
 print(f"\nP12 密码: 1")
