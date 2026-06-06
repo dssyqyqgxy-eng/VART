@@ -10,11 +10,6 @@
 OUTPUT_DIR="${1:-./cert_output}"
 mkdir -p "$OUTPUT_DIR"
 
-# 获取绝对路径
-cd "$OUTPUT_DIR"
-OUTPUT_DIR_ABS=$(pwd)
-cd - > /dev/null
-
 # 创建 OpenSSL 配置文件
 cat > "$OUTPUT_DIR/openssl.cnf" << 'EOF'
 [ req ]
@@ -109,23 +104,67 @@ openssl x509 -req -in "$OUTPUT_DIR/Software_Signing_Tips_Clone.csr" -out "$OUTPU
   -extfile "$OUTPUT_DIR/openssl.cnf" -extensions leaf_ext 2>/dev/null
 echo "  ✅ Software_Signing_Tips_Clone.cer / .key"
 
-# 4. 生成 P12
+# 4. 生成 P12（使用绝对路径，确保文件存在）
 echo ""
 echo "[4/4] 生成 P12（包含私钥 + 完整证书链）"
 
-# 合并完整证书链
+# 检查所有必要文件是否存在
+if [ ! -f "$OUTPUT_DIR/Software_Signing_Tips_Clone.key" ]; then
+    echo "  ❌ 私钥文件不存在"
+    exit 1
+fi
+if [ ! -f "$OUTPUT_DIR/Software_Signing_Tips_Clone.cer" ]; then
+    echo "  ❌ 叶子证书不存在"
+    exit 1
+fi
+if [ ! -f "$OUTPUT_DIR/Apple_Code_Signing_CA.cer" ]; then
+    echo "  ❌ 中间证书不存在"
+    exit 1
+fi
+if [ ! -f "$OUTPUT_DIR/Apple_Root_CA.cer" ]; then
+    echo "  ❌ 根证书不存在"
+    exit 1
+fi
+
+# 合并完整证书链（中间 + 根）
 cat "$OUTPUT_DIR/Apple_Code_Signing_CA.cer" "$OUTPUT_DIR/Apple_Root_CA.cer" > "$OUTPUT_DIR/fullchain.pem"
 
+# 验证合并后的文件不为空
+if [ ! -s "$OUTPUT_DIR/fullchain.pem" ]; then
+    echo "  ❌ 证书链文件为空"
+    exit 1
+fi
+
 # 生成 P12
+echo "  正在生成 P12..."
 openssl pkcs12 -export -out "$OUTPUT_DIR/Software_Signing_Tips_Clone.p12" \
   -inkey "$OUTPUT_DIR/Software_Signing_Tips_Clone.key" \
   -in "$OUTPUT_DIR/Software_Signing_Tips_Clone.cer" \
   -certfile "$OUTPUT_DIR/fullchain.pem" \
   -passout pass:1 \
-  -name "Software Signing" 2>/dev/null
+  -name "Software Signing" 2>&1
 
+# 检查生成结果
 if [ -f "$OUTPUT_DIR/Software_Signing_Tips_Clone.p12" ]; then
-    echo "  ✅ Software_Signing_Tips_Clone.p12 (密码: 1)"
+    # 检查文件大小（P12 应该大于 2KB）
+    P12_SIZE=$(stat -f%z "$OUTPUT_DIR/Software_Signing_Tips_Clone.p12" 2>/dev/null || stat -c%s "$OUTPUT_DIR/Software_Signing_Tips_Clone.p12" 2>/dev/null)
+    if [ "$P12_SIZE" -gt 2048 ]; then
+        echo "  ✅ Software_Signing_Tips_Clone.p12 (密码: 1, 大小: $P12_SIZE 字节)"
+    else
+        echo "  ⚠️ P12 文件太小 (${P12_SIZE}字节)，可能只包含私钥"
+        rm -f "$OUTPUT_DIR/Software_Signing_Tips_Clone.p12"
+        # 尝试另一种方式
+        echo "  尝试用另一种方式生成..."
+        openssl pkcs12 -export -out "$OUTPUT_DIR/Software_Signing_Tips_Clone.p12" \
+          -inkey "$OUTPUT_DIR/Software_Signing_Tips_Clone.key" \
+          -in "$OUTPUT_DIR/Software_Signing_Tips_Clone.cer" \
+          -chain -CAfile "$OUTPUT_DIR/Apple_Root_CA.cer" \
+          -passout pass:1 \
+          -name "Software Signing" 2>/dev/null
+        if [ -f "$OUTPUT_DIR/Software_Signing_Tips_Clone.p12" ]; then
+            echo "  ✅ P12 生成成功（使用 -chain 方式）"
+        fi
+    fi
 else
     echo "  ❌ P12 生成失败"
 fi
@@ -133,20 +172,21 @@ fi
 # 5. 清理临时文件
 rm -f "$OUTPUT_DIR"/*.csr "$OUTPUT_DIR"/fullchain.pem "$OUTPUT_DIR"/openssl.cnf
 
-# 6. 验证证书链（使用绝对路径）
+# 6. 验证 P12 内容
 echo ""
-echo "验证证书链:"
-if [ -f "$OUTPUT_DIR/Apple_Root_CA.cer" ] && [ -f "$OUTPUT_DIR/Apple_Code_Signing_CA.cer" ] && [ -f "$OUTPUT_DIR/Software_Signing_Tips_Clone.cer" ]; then
-    openssl verify -CAfile "$OUTPUT_DIR/Apple_Root_CA.cer" -untrusted "$OUTPUT_DIR/Apple_Code_Signing_CA.cer" "$OUTPUT_DIR/Software_Signing_Tips_Clone.cer" 2>/dev/null
-    if [ $? -eq 0 ]; then
-        echo "  ✅ 证书链验证通过"
-    else
-        echo "  ⚠️ 证书链验证失败（不影响使用）"
-    fi
-else
-    echo "  ⚠️ 证书文件不完整，跳过验证"
+echo "============================================================"
+echo "验证 P12 内容"
+echo "============================================================"
+if [ -f "$OUTPUT_DIR/Software_Signing_Tips_Clone.p12" ]; then
+    echo ""
+    echo "P12 中的证书数量:"
+    openssl pkcs12 -in "$OUTPUT_DIR/Software_Signing_Tips_Clone.p12" -nokeys -passin pass:1 2>/dev/null | grep -c "BEGIN CERTIFICATE"
+    echo ""
+    echo "P12 中的私钥:"
+    openssl pkcs12 -in "$OUTPUT_DIR/Software_Signing_Tips_Clone.p12" -nocerts -passin pass:1 -passout pass:tmp 2>/dev/null | grep -c "BEGIN PRIVATE"
 fi
 
+# 7. 汇总
 echo ""
 echo "============================================================"
 echo "生成完成"
@@ -154,15 +194,7 @@ echo "============================================================"
 echo "输出目录: $OUTPUT_DIR"
 echo ""
 echo "输出文件:"
-ls -la "$OUTPUT_DIR" | grep -E "\.(cer|key|p12)$" | awk '{print "  📄 " $9}'
+ls -la "$OUTPUT_DIR" | grep -E "\.(cer|key|p12)$" | awk '{print "  📄 " $9 " (" $5 " bytes)"}'
 echo ""
 echo "P12 密码: 1"
 echo "============================================================"
-
-# 7. 显示 P12 信息
-echo ""
-echo "P12 文件信息:"
-if [ -f "$OUTPUT_DIR/Software_Signing_Tips_Clone.p12" ]; then
-    openssl pkcs12 -info -in "$OUTPUT_DIR/Software_Signing_Tips_Clone.p12" -passin pass:1 -noout 2>/dev/null
-    echo "  ✅ P12 包含私钥和证书"
-fi
