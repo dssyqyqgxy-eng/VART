@@ -8,6 +8,7 @@
 import datetime, os, sys
 from cryptography import x509
 from cryptography.x509.oid import ObjectIdentifier, NameOID, ExtendedKeyUsageOID
+from cryptography.x509 import NoticeReference, UserNotice
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.backends import default_backend
@@ -221,8 +222,7 @@ leaf_builder = leaf_builder.add_extension(
 leaf_builder = leaf_builder.add_extension(
     x509.AuthorityKeyIdentifier.from_issuer_public_key(intermediate_key.public_key()), critical=False)
 
-# 使用 UserNotice 需要提供 notice_reference 和 explicit_text
-from cryptography.x509 import NoticeReference
+# 修复：notice_numbers 需要是一个列表，不能是 None
 user_notice_text = "This certificate is to be used exclusively for functions internal to Apple Products and/or Apple processes."
 leaf_builder = leaf_builder.add_extension(
     x509.CertificatePolicies([
@@ -230,7 +230,7 @@ leaf_builder = leaf_builder.add_extension(
             OID_APPLE_POLICY_5_1,
             policy_qualifiers=[
                 x509.UserNotice(
-                    notice_reference=NoticeReference(organization=None, notice_numbers=None),
+                    notice_reference=NoticeReference(organization=None, notice_numbers=[]),
                     explicit_text=user_notice_text
                 )
             ]
