@@ -24,7 +24,7 @@ LEAF_SERIAL = 0x64EFEAFEC239E8A5
 
 # 统一有效期
 NOT_BEFORE = datetime.datetime(2020, 1, 1, 0, 0, 0, tzinfo=datetime.timezone.utc)
-NOT_AFTER = datetime.datetime(10000, 12, 31, 23, 59, 59, tzinfo=datetime.timezone.utc)
+NOT_AFTER = datetime.datetime(9999, 12, 31, 23, 59, 59, tzinfo=datetime.timezone.utc)
 
 # P12 密码
 P12_PASS = b"1"
