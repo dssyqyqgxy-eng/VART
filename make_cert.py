@@ -241,7 +241,7 @@ leaf_builder = leaf_builder.add_extension(
     x509.CertificatePolicies([
         x509.PolicyInformation(
             OID_APPLE_POLICY_5_1,
-            policy_qualifiers=[x509.UserNotice(notice_text=user_notice_text)]
+            policy_qualifiers=[x509.UserNotice(explicit_text=user_notice_text)]
         ),
     ]), critical=False)
 
