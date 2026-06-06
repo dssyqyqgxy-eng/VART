@@ -2,8 +2,7 @@ name: Generate Certificates
 
 on:
   push:
-    paths:
-      - 'make_cert.sh'
+  
   workflow_dispatch:
 
 jobs:
