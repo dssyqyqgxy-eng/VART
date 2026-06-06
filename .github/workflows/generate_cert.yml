@@ -3,24 +3,23 @@ name: Generate Certificates
 on:
   push:
     paths:
-      - 'make_cert.py'
+      - 'make_cert.sh'
   workflow_dispatch:
 
 jobs:
   generate:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install cryptography 3.4.8 (supports SHA1)
-        run: |
-          pip uninstall cryptography -y || true
-          pip install cryptography==3.4.8
+      - name: Install OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y openssl
 
-      - name: Run certificate generator
+      - name: Generate certificates
         run: |
-          python3 make_cert.py ./cert_output
+          chmod +x make_cert.sh
+          ./make_cert.sh ./cert_output
 
       - name: Upload certificates
         uses: actions/upload-artifact@v4
