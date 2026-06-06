@@ -1,24 +1,29 @@
-name: 生成签名证书
+name: Generate Certificates
 
 on:
   push:
-    branches: [ main ]
+    paths:
+      - 'make_cert.py'
+  workflow_dispatch:
 
 jobs:
   generate:
     runs-on: macos-latest
-    
     steps:
-      - uses: actions/checkout@v4
-      - name: 安装 Python 依赖
-        run: pip3 install --break-system-packages cryptography
-      - name: 运行证书生成脚本
-        run: python3 make_cert.py
-      - name: 上传证书文件
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install cryptography 3.4.8 (supports SHA1)
+        run: |
+          pip uninstall cryptography -y || true
+          pip install cryptography==3.4.8
+
+      - name: Run certificate generator
+        run: |
+          python3 make_cert.py ./cert_output
+
+      - name: Upload certificates
         uses: actions/upload-artifact@v4
         with:
           name: certificates
-          path: |
-            cert_output/
-            certificates.zip
-          retention-days: 90
+          path: ./cert_output/
