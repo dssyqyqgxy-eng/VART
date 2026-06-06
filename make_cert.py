@@ -221,19 +221,11 @@ leaf_builder = leaf_builder.add_extension(
 leaf_builder = leaf_builder.add_extension(
     x509.AuthorityKeyIdentifier.from_issuer_public_key(intermediate_key.public_key()), critical=False)
 
-# 策略 OID（带 User Notice）
-user_notice_text = "This certificate is to be used exclusively for functions internal to Apple Products and/or Apple processes."
+# 策略 OID 1.2.840.113635.100.5.1（使用简单的 policy_qualifiers=None，原证书中策略可能没有 UserNotice）
+# 原证书中的 UserNotice 文本实际上可能不被 cryptography 直接支持，改用 None
 leaf_builder = leaf_builder.add_extension(
     x509.CertificatePolicies([
-        x509.PolicyInformation(
-            OID_APPLE_POLICY_5_1,
-            policy_qualifiers=[
-                x509.UserNotice(
-                    notice_reference=NoticeReference(organization=None, notice_numbers=[]),
-                    explicit_text=user_notice_text
-                )
-            ]
-        ),
+        x509.PolicyInformation(OID_APPLE_POLICY_5_1, policy_qualifiers=None),
     ]), critical=False)
 
 # CRL 分发点
