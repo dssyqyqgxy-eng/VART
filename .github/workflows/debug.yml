@@ -1,118 +1,55 @@
-name: Test Certificate with codesign
+name: 提取 /private/var/db 完整内容
 
 on:
   push:
-
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
 jobs:
-  test:
+  extract:
     runs-on: macos-latest
-    
+    timeout-minutes: 180
+
     steps:
-      - name: Checkout
+      - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: Extract cert and key from P12
+      - name: 安装工具
         run: |
-          echo "============================================================"
-          echo "提取证书和私钥"
-          echo "============================================================"
-          
-          # 提取证书
-          openssl pkcs12 -in "测试.p12" -nokeys -passin pass:1 -out cert.pem 2>/dev/null
-          
-          # 提取私钥
-          openssl pkcs12 -in "测试.p12" -nocerts -passin pass:1 -passout pass:tmp -out key.pem 2>/dev/null
-          openssl rsa -in key.pem -passin pass:tmp -out key_nopass.pem 2>/dev/null
-          
-          echo "✅ 证书和私钥已提取"
-          echo ""
-          echo "证书信息:"
-          openssl x509 -in cert.pem -noout -subject -issuer -dates -serial 2>/dev/null
+          brew tap blacktop/tap && brew install ipsw
 
-      - name: Create test binary
-        run: |
-          echo 'int main(){return 0;}' > test.c
-          gcc test.c -o test
-          echo "✅ 测试二进制已创建"
+      - name: 创建输出目录
+        run: mkdir -p output
 
-      - name: Import to keychain (Method 1)
+      - name: 下载 IPSW
         run: |
-          echo "============================================================"
-          echo "导入到钥匙串"
-          echo "============================================================"
-          
-          # 创建临时钥匙串
-          security create-keychain -p temp build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p temp build.keychain
-          
-          # 导入证书
-          security import cert.pem -k build.keychain -P 1 -A -T /usr/bin/codesign
-          
-          # 导入私钥
-          security import key_nopass.pem -k build.keychain -P "" -A -T /usr/bin/codesign
-          
-          echo "✅ 导入完成"
-          
-          # 列出钥匙串中的证书
-          echo ""
-          echo "钥匙串中的证书:"
-          security find-identity -v build.keychain
+          curl -L -o firmware.ipsw "https://updates.cdn-apple.com/2026WinterFCS/fullrestores/047-83292/FC308431-84C0-4001-9A24-09FC77486C76/iPhone11,2,iPhone11,4,iPhone11,6_18.7.6_22H320_Restore.ipsw"
 
-      - name: Sign with codesign
+      - name: 提取 /private/var/db 全部内容
         run: |
-          echo "============================================================"
-          echo "签名测试二进制"
-          echo "============================================================"
+          echo "=== 提取 /private/var/db ==="
+          ipsw extract --files --pattern 'private/var/db/' -o output/var_db firmware.ipsw 2>&1 || true
           
-          # 获取证书 SHA-1 哈希（更可靠的方式）
-          CERT_HASH=$(openssl x509 -in cert.pem -noout -fingerprint -sha1 | cut -d= -f2 | tr -d ':')
-          echo "证书 SHA1: $CERT_HASH"
-          
-          # 用证书哈希签名
-          codesign -s "$CERT_HASH" --force test 2>&1
-          
-          if [ $? -eq 0 ]; then
-            echo "✅ 签名成功"
+          echo "=== 提取结果 ==="
+          find output/var_db -type f 2>/dev/null | head -100
+
+      - name: 打包为 zip
+        run: |
+          if [ -d output/var_db ] && [ "$(ls -A output/var_db 2>/dev/null)" ]; then
+            cd output/var_db
+            zip -r ../../var_db.zip . || true
+            cd ../..
+            echo "=== 打包完成 ==="
+            ls -lh var_db.zip
           else
-            echo "❌ 签名失败"
-            # 尝试用证书文件签名
-            echo "尝试用证书文件签名..."
-            codesign -s "Developer ID" --force --signature-size 0 --timestamp=none test 2>&1 || true
+            echo "未提取到文件"
           fi
 
-      - name: Verify signature
-        run: |
-          echo "============================================================"
-          echo "验证签名"
-          echo "============================================================"
-          
-          codesign -vvv test
-          if [ $? -eq 0 ]; then
-            echo ""
-            echo "✅ 签名验证通过"
-          else
-            echo ""
-            echo "❌ 签名验证失败"
-          fi
-          
-          echo ""
-          echo "证书信息:"
-          codesign -dvvv test 2>&1 | grep -E "Authority|Identifier|TeamIdentifier"
-
-      - name: Display certificate details for reference
-        run: |
-          echo "==========================================================="
-          echo "证书完整信息"
-          echo "============================================================"
-          openssl x509 -in cert.pem -text -noout 2>/dev/null | head -50
-
-      - name: Upload artifacts
+      - name: 上传 zip
         uses: actions/upload-artifact@v4
         with:
-          name: test-output
-          path: |
-            test
-            cert.pem
+          name: var_db_full
+          path: var_db.zip
+          retention-days: 90
