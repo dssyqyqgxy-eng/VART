@@ -2,8 +2,7 @@ name: Test Certificate with codesign/amfid
 
 on:
   push:
-    paths:
-      - '测试.p12'
+
   workflow_dispatch:
 
 jobs:
