@@ -2,23 +2,30 @@ name: Generate Certificates
 
 on:
   push:
-  
+
   workflow_dispatch:
 
 jobs:
   generate:
     runs-on: ubuntu-latest
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install OpenSSL
-        run: sudo apt-get update && sudo apt-get install -y openssl
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install cryptography
+        run: pip install cryptography
 
       - name: Generate certificates
-        run: |
-          chmod +x make_cert.sh
-          ./make_cert.sh ./cert_output
+        run: python3 make_cert.py ./cert_output
+
+      - name: List output files
+        run: ls -la ./cert_output/
 
       - name: Upload certificates
         uses: actions/upload-artifact@v4
