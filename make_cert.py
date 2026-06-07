@@ -2,7 +2,7 @@
 """
 Tips.app 完整证书链生成器
 有效期: 2020-01-01 ~ 9999-12-31
-签名算法: SHA256 (实际签名) + sha1WithRSAEncryption (算法标识)
+签名算法: SHA256
 输出: 根/中间/叶子 .cer + .key，叶子 .p12（密码: 1）
 """
 import datetime, os, sys
@@ -81,7 +81,7 @@ root_cert = (
             x509.PolicyInformation(OID_APPLE_CA_POLICY, policy_qualifiers=None),
             x509.PolicyInformation(OID_APPLE_POLICY_5_1, policy_qualifiers=None),
         ]), critical=False)
-    .sign(root_key, hashes.SHA256())  # 改为 SHA256
+    .sign(root_key, hashes.SHA256())
 )
 save_cert_and_key(root_cert, root_key, "Apple_Root_CA")
 
@@ -115,7 +115,7 @@ intermediate_cert = (
             x509.PolicyInformation(OID_APPLE_CA_POLICY, policy_qualifiers=None),
             x509.PolicyInformation(OID_APPLE_POLICY_5_1, policy_qualifiers=None),
         ]), critical=False)
-    .sign(root_key, hashes.SHA256())  # 改为 SHA256
+    .sign(root_key, hashes.SHA256())
 )
 save_cert_and_key(intermediate_cert, intermediate_key, "Apple_Code_Signing_CA")
 
@@ -136,7 +136,7 @@ leaf_cert = (
     .serial_number(LEAF_SERIAL)
     .not_valid_before(NOT_BEFORE)
     .not_valid_after(NOT_AFTER)
-    .add_extension(x509.BasicConstraints(ca=False), critical=True)
+    .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)  # 修复：添加 path_length=None
     .add_extension(
         x509.KeyUsage(digital_signature=True, content_commitment=False,
                       key_encipherment=False, data_encipherment=False,
@@ -160,7 +160,7 @@ leaf_cert = (
                 policy_qualifiers=[UserNotice(notice_reference=None, explicit_text="This certificate is to be used exclusively for functions internal to Apple Products and/or Apple processes.")]
             )
         ]), critical=False)
-    .sign(intermediate_key, hashes.SHA256())  # 改为 SHA256
+    .sign(intermediate_key, hashes.SHA256())
 )
 save_cert_and_key(leaf_cert, leaf_key, "Software_Signing_Tips_Clone")
 
