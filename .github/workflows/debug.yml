@@ -1,4 +1,4 @@
-name: 提取 /private/var/db 完整内容
+name: amfid 完整逆向分析
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  extract:
+  analyze:
     runs-on: macos-latest
     timeout-minutes: 180
 
@@ -16,40 +16,201 @@ jobs:
       - name: 检出仓库
         uses: actions/checkout@v4
 
+      - name: 解压框架
+        run: unzip -q amfid.zip -d extracted_frameworks/ 2>/dev/null || true
+
       - name: 安装工具
         run: |
-          brew tap blacktop/tap && brew install ipsw
+          brew install radare2 binutils lzfse capstone keystone
+          brew install --cask ghidra 2>/dev/null || true
+          # 如果 ghidra cask 不可用，直接下载
+          if [ ! -d "/Applications/ghidra_"* ]; then
+            curl -L -o ghidra.zip "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.0.3_build/ghidra_11.0.3_PUBLIC_20240410.zip"
+            unzip -q ghidra.zip -d /Applications/
+          fi
+          GHIDRA_HOME=$(find /Applications -name "ghidra_*" -type d -maxdepth 1 | head -1)
+          echo "GHIDRA_HOME=$GHIDRA_HOME" >> $GITHUB_ENV
 
       - name: 创建输出目录
-        run: mkdir -p output
+        run: mkdir -p output/{amfid,security_fw,amfi_fw,reports}
 
-      - name: 下载 IPSW
+      - name: amfid 基础分析
         run: |
-          curl -L -o firmware.ipsw "https://updates.cdn-apple.com/2026WinterFCS/fullrestores/047-83292/FC308431-84C0-4001-9A24-09FC77486C76/iPhone11,2,iPhone11,4,iPhone11,6_18.7.6_22H320_Restore.ipsw"
-
-      - name: 提取 /private/var/db 全部内容
-        run: |
-          echo "=== 提取 /private/var/db ==="
-          ipsw extract --files --pattern 'private/var/db/' -o output/var_db firmware.ipsw 2>&1 || true
+          if [ ! -f amfid ]; then
+            echo "未找到 amfid 文件"
+            exit 1
+          fi
           
-          echo "=== 提取结果 ==="
-          find output/var_db -type f 2>/dev/null | head -100
+          echo "=== 文件信息 ===" > output/amfid/info.txt
+          file amfid >> output/amfid/info.txt
+          
+          echo "=== Mach-O 头 ===" > output/amfid/header.txt
+          otool -hv amfid >> output/amfid/header.txt 2>&1
+          
+          echo "=== Load Commands ===" > output/amfid/load_commands.txt
+          otool -l amfid >> output/amfid/load_commands.txt 2>&1
+          
+          echo "=== 动态库依赖 ===" > output/amfid/dylibs.txt
+          otool -L amfid >> output/amfid/dylibs.txt 2>&1
 
-      - name: 打包为 zip
+      - name: amfid 符号和字符串
         run: |
-          if [ -d output/var_db ] && [ "$(ls -A output/var_db 2>/dev/null)" ]; then
-            cd output/var_db
-            zip -r ../../var_db.zip . || true
-            cd ../..
-            echo "=== 打包完成 ==="
-            ls -lh var_db.zip
-          else
-            echo "未提取到文件"
+          echo "=== 所有符号 ===" > output/amfid/symbols.txt
+          nm -C -a amfid >> output/amfid/symbols.txt 2>&1
+          
+          echo "=== 导出函数 ===" > output/amfid/exports.txt
+          nm -gU amfid >> output/amfid/exports.txt 2>&1
+          
+          echo "=== 导入函数 ===" > output/amfid/imports.txt
+          nm -u amfid >> output/amfid/imports.txt 2>&1
+          
+          echo "=== 代码签名相关导入 ===" > output/amfid/trust_imports.txt
+          nm -u amfid | grep -iE "AMFI|Trust|Code|Sign|Verify|Validate|CDHash|Entitle|Provision|CMS|PKCS|XPC|Mach|SecTask|SecCode|SecTrust|SecRequirement" >> output/amfid/trust_imports.txt 2>&1
+          
+          echo "=== CoreTrust 相关字符串 ===" > output/amfid/coretrust_strings.txt
+          strings amfid | grep -iE "coretrust|CoreTrust|trustcache|TrustCache|cdhash|CDHash|img4|IMG4|im4p|IM4P|AMFI|amfi|cms_verify|CMS|PKCS7|signature|entitlement|provision|teamid|TeamID|TeamIdentifier|csops|CS_OPS" | sort -u >> output/amfid/coretrust_strings.txt
+          
+          echo "=== XPC 相关字符串 ===" > output/amfid/xpc_strings.txt
+          strings amfid | grep -iE "xpc|XPC|bootstrap|mach_msg|mach_port|task_for_pid|host_get" | sort -u >> output/amfid/xpc_strings.txt
+          
+          echo "=== 所有字符串 ===" > output/amfid/all_strings.txt
+          strings -n 8 amfid | sort -u >> output/amfid/all_strings.txt
+
+      - name: amfid 反汇编
+        run: |
+          # 完整函数列表
+          r2 -q -c 'aaa; afl' amfid > output/amfid/functions.txt 2>&1
+          
+          # 入口点
+          r2 -q -c 'aaa; ie' amfid > output/amfid/entry_points.txt 2>&1
+          
+          # main 函数反汇编
+          r2 -q -c 'aaa; s main; pdf' amfid > output/amfid/main_disasm.txt 2>&1
+          
+          # main 函数伪代码
+          r2 -q -c 'aaa; aac; pdc @ main' amfid > output/amfid/main_decompiled.c 2>&1
+          
+          # main 函数交叉引用
+          r2 -q -c 'aaa; axt main' amfid > output/amfid/main_xrefs.txt 2>&1
+          
+          # 所有函数伪代码
+          r2 -q -c 'aaa; aac; aaft; pdc' amfid > output/amfid/all_decompiled.c 2>&1
+          
+          # 签名验证相关函数反汇编
+          for FUNC in $(nm amfid 2>/dev/null | grep -iE "trust|verify|validate|sign|check|code|hash|cdhash|entitle|provision|cert|cms|pkcs|img4|amfi" | awk '{print $3}' | head -50); do
+            echo "=== $FUNC ===" >> output/amfid/trust_functions_disasm.txt
+            r2 -q -c "aaa; s sym.$FUNC; pdf" amfid >> output/amfid/trust_functions_disasm.txt 2>&1 || true
+            echo "=== $FUNC 伪代码 ===" >> output/amfid/trust_functions_decompiled.c
+            r2 -q -c "aaa; s sym.$FUNC; pdc" amfid >> output/amfid/trust_functions_decompiled.c 2>&1 || true
+          done
+          
+          # 搜索 CoreTrust 交叉引用
+          r2 -q -c 'aaa; /a coretrust' amfid > output/amfid/coretrust_xrefs.txt 2>&1
+          r2 -q -c 'aaa; /a trustcache' amfid > output/amfid/trustcache_xrefs.txt 2>&1
+          r2 -q -c 'aaa; /a AMFI' amfid > output/amfid/amfi_xrefs.txt 2>&1
+          r2 -q -c 'aaa; /a verify' amfid > output/amfid/verify_xrefs.txt 2>&1
+          r2 -q -c 'aaa; /a signature' amfid > output/amfid/signature_xrefs.txt 2>&1
+          r2 -q -c 'aaa; /a cdhash' amfid > output/amfid/cdhash_xrefs.txt 2>&1
+          
+          cat output/amfid/trust_imports.txt
+
+      - name: Security.framework 分析
+        run: |
+          SEC_BIN=$(find extracted_frameworks -type f -name "Security" 2>/dev/null | head -1)
+          if [ -n "$SEC_BIN" ]; then
+            echo "=== Security.framework ==="
+            file "$SEC_BIN" > output/security_fw/info.txt
+            
+            nm -C -a "$SEC_BIN" > output/security_fw/symbols.txt 2>&1
+            nm -gU "$SEC_BIN" > output/security_fw/exports.txt 2>&1
+            
+            # SecCode API
+            echo "=== SecCode API ===" > output/security_fw/api_seccode.txt
+            nm -gU "$SEC_BIN" | grep -iE "SecCode" >> output/security_fw/api_seccode.txt
+            
+            # SecTrust API
+            echo "=== SecTrust API ===" > output/security_fw/api_sectrust.txt
+            nm -gU "$SEC_BIN" | grep -iE "SecTrust|SecPolicy|SecCertificate" >> output/security_fw/api_sectrust.txt
+            
+            # CMS API
+            echo "=== CMS API ===" > output/security_fw/api_cms.txt
+            nm -gU "$SEC_BIN" | grep -iE "CMS|SecCMS|PKCS" >> output/security_fw/api_cms.txt
+            
+            # 签名验证相关
+            strings "$SEC_BIN" | grep -iE "coretrust|trustcache|cdhash|signature|verify|cms|pkcs|img4|amfi|teamid|oid" | sort -u > output/security_fw/trust_strings.txt
+            
+            # 反汇编 SecCode 函数
+            for FUNC in $(nm -gU "$SEC_BIN" 2>/dev/null | grep -iE "SecCodeCreate|SecCodeCheckValidity|SecCodeCopySigningInformation" | awk '{print $3}'); do
+              echo "=== $FUNC ===" >> output/security_fw/seccode_disasm.txt
+              r2 -q -c "aaa; s sym.$FUNC; pdf" "$SEC_BIN" >> output/security_fw/seccode_disasm.txt 2>&1 || true
+              echo "=== $FUNC 伪代码 ===" >> output/security_fw/seccode_decompiled.c
+              r2 -q -c "aaa; s sym.$FUNC; pdc" "$SEC_BIN" >> output/security_fw/seccode_decompiled.c 2>&1 || true
+            done
           fi
 
-      - name: 上传 zip
+      - name: AppleMobileFileIntegrity.framework 分析
+        run: |
+          AMFI_BIN=$(find extracted_frameworks -type f -name "AppleMobileFileIntegrity" 2>/dev/null | head -1)
+          if [ -n "$AMFI_BIN" ]; then
+            echo "=== AppleMobileFileIntegrity.framework ==="
+            file "$AMFI_BIN" > output/amfi_fw/info.txt
+            
+            nm -C -a "$AMFI_BIN" > output/amfi_fw/symbols.txt 2>&1
+            nm -gU "$AMFI_BIN" > output/amfi_fw/exports.txt 2>&1
+            
+            strings "$AMFI_BIN" | grep -iE "coretrust|trustcache|cdhash|signature|verify|amfi|teamid|oid|entitle" | sort -u > output/amfi_fw/trust_strings.txt
+            
+            # 反汇编导出函数
+            for FUNC in $(nm -gU "$AMFI_BIN" 2>/dev/null | head -30 | awk '{print $3}'); do
+              echo "=== $FUNC ===" >> output/amfi_fw/exports_disasm.txt
+              r2 -q -c "aaa; s sym.$FUNC; pdf" "$AMFI_BIN" >> output/amfi_fw/exports_disasm.txt 2>&1 || true
+            done
+          fi
+
+      - name: Ghidra 分析 amfid
+        run: |
+          if [ -f amfid ] && [ -n "$GHIDRA_HOME" ]; then
+            echo "=== Ghidra 分析 amfid ==="
+            GHIDRA_HEADLESS="$GHIDRA_HOME/support/analyzeHeadless"
+            if [ -f "$GHIDRA_HEADLESS" ]; then
+              PROJECT_DIR="output/amfid/ghidra_project"
+              mkdir -p "$PROJECT_DIR"
+              "$GHIDRA_HEADLESS" "$PROJECT_DIR" "amfid" -import amfid -postScript "AutoAnalysis.java" -analysisTimeoutPerFile 600 2>&1 || true
+              echo "Ghidra 项目已创建"
+            fi
+          fi
+
+      - name: 生成分析报告
+        run: |
+          echo "# amfid 完整逆向分析报告" > output/reports/AMFID_REPORT.md
+          echo "" >> output/reports/AMFID_REPORT.md
+          
+          echo "## 文件信息" >> output/reports/AMFID_REPORT.md
+          cat output/amfid/info.txt >> output/reports/AMFID_REPORT.md
+          
+          echo "" >> output/reports/AMFID_REPORT.md
+          echo "## 动态库依赖" >> output/reports/AMFID_REPORT.md
+          cat output/amfid/dylibs.txt >> output/reports/AMFID_REPORT.md
+          
+          echo "" >> output/reports/AMFID_REPORT.md
+          echo "## 代码签名相关导入函数" >> output/reports/AMFID_REPORT.md
+          cat output/amfid/trust_imports.txt >> output/reports/AMFID_REPORT.md
+          
+          echo "" >> output/reports/AMFID_REPORT.md
+          echo "## CoreTrust 相关字符串" >> output/reports/AMFID_REPORT.md
+          cat output/amfid/coretrust_strings.txt >> output/reports/AMFID_REPORT.md
+          
+          echo "" >> output/reports/AMFID_REPORT.md
+          echo "## main 函数反汇编" >> output/reports/AMFID_REPORT.md
+          head -100 output/amfid/main_disasm.txt >> output/reports/AMFID_REPORT.md
+          
+          echo "" >> output/reports/AMFID_REPORT.md
+          echo "## 签名验证函数列表" >> output/reports/AMFID_REPORT.md
+          nm amfid 2>/dev/null | grep -iE "trust|verify|validate|sign|check|code|hash|cdhash|entitle|provision|cert|cms|pkcs|img4|amfi" | head -50 >> output/reports/AMFID_REPORT.md
+
+      - name: 上传分析结果
         uses: actions/upload-artifact@v4
         with:
-          name: var_db_full
-          path: var_db.zip
+          name: amfid_full_reverse
+          path: output/
           retention-days: 90
