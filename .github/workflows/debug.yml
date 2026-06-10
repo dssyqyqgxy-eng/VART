@@ -1,4 +1,4 @@
-name: amfid 完整逆向分析
+name: amfid 完整深度逆向分析
 
 on:
   push:
@@ -10,7 +10,7 @@ on:
 jobs:
   analyze:
     runs-on: macos-latest
-    timeout-minutes: 180
+    timeout-minutes: 240
 
     steps:
       - name: 检出仓库
@@ -22,195 +22,312 @@ jobs:
       - name: 安装工具
         run: |
           brew install radare2 binutils lzfse capstone keystone
-          brew install --cask ghidra 2>/dev/null || true
-          # 如果 ghidra cask 不可用，直接下载
-          if [ ! -d "/Applications/ghidra_"* ]; then
-            curl -L -o ghidra.zip "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.0.3_build/ghidra_11.0.3_PUBLIC_20240410.zip"
-            unzip -q ghidra.zip -d /Applications/
-          fi
+          curl -L -o ghidra.zip "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.0.3_build/ghidra_11.0.3_PUBLIC_20240410.zip"
+          unzip -q ghidra.zip -d /Applications/
           GHIDRA_HOME=$(find /Applications -name "ghidra_*" -type d -maxdepth 1 | head -1)
           echo "GHIDRA_HOME=$GHIDRA_HOME" >> $GITHUB_ENV
 
       - name: 创建输出目录
-        run: mkdir -p output/{amfid,security_fw,amfi_fw,reports}
+        run: mkdir -p output/{1_static,2_signing,3_ipc,4_vuln,ghidra,reports}
 
-      - name: amfid 基础分析
+      # ==================== 一、二进制静态分析 ====================
+      - name: 一、Mach-O 结构分析
         run: |
-          if [ ! -f amfid ]; then
-            echo "未找到 amfid 文件"
-            exit 1
-          fi
+          echo "=== 文件类型 ===" > output/1_static/info.txt
+          file amfid >> output/1_static/info.txt
           
-          echo "=== 文件信息 ===" > output/amfid/info.txt
-          file amfid >> output/amfid/info.txt
+          echo "=== Mach-O 头 ===" > output/1_static/header.txt
+          otool -hv amfid >> output/1_static/header.txt 2>&1
           
-          echo "=== Mach-O 头 ===" > output/amfid/header.txt
-          otool -hv amfid >> output/amfid/header.txt 2>&1
+          echo "=== Fat Binary 信息 ===" > output/1_static/fat.txt
+          otool -fv amfid >> output/1_static/fat.txt 2>&1
           
-          echo "=== Load Commands ===" > output/amfid/load_commands.txt
-          otool -l amfid >> output/amfid/load_commands.txt 2>&1
+          echo "=== Load Commands ===" > output/1_static/load_commands.txt
+          otool -l amfid >> output/1_static/load_commands.txt 2>&1
           
-          echo "=== 动态库依赖 ===" > output/amfid/dylibs.txt
-          otool -L amfid >> output/amfid/dylibs.txt 2>&1
+          echo "=== 段信息 ===" > output/1_static/segments.txt
+          otool -l amfid | grep -A5 "LC_SEGMENT_64" | grep -E "(segname|vmaddr|vmsize|fileoff|filesize|maxprot|initprot)" >> output/1_static/segments.txt 2>&1
+          
+          echo "=== 动态库依赖 ===" > output/1_static/dylibs.txt
+          otool -L amfid >> output/1_static/dylibs.txt 2>&1
+          
+          echo "=== 入口点 ===" > output/1_static/entry.txt
+          r2 -q -c 'aaa; ie' amfid >> output/1_static/entry.txt 2>&1
+          
+          echo "=== 节信息 ===" > output/1_static/sections.txt
+          r2 -q -c 'aaa; iS' amfid >> output/1_static/sections.txt 2>&1
 
-      - name: amfid 符号和字符串
+      - name: 一、符号和字符串分析
         run: |
-          echo "=== 所有符号 ===" > output/amfid/symbols.txt
-          nm -C -a amfid >> output/amfid/symbols.txt 2>&1
+          echo "=== 所有符号 ===" > output/1_static/symbols_all.txt
+          nm -C -a amfid >> output/1_static/symbols_all.txt 2>&1
           
-          echo "=== 导出函数 ===" > output/amfid/exports.txt
-          nm -gU amfid >> output/amfid/exports.txt 2>&1
+          echo "=== 导出函数 ===" > output/1_static/exports.txt
+          nm -gU amfid >> output/1_static/exports.txt 2>&1
           
-          echo "=== 导入函数 ===" > output/amfid/imports.txt
-          nm -u amfid >> output/amfid/imports.txt 2>&1
+          echo "=== 导入函数 ===" > output/1_static/imports_all.txt
+          nm -u amfid >> output/1_static/imports_all.txt 2>&1
           
-          echo "=== 代码签名相关导入 ===" > output/amfid/trust_imports.txt
-          nm -u amfid | grep -iE "AMFI|Trust|Code|Sign|Verify|Validate|CDHash|Entitle|Provision|CMS|PKCS|XPC|Mach|SecTask|SecCode|SecTrust|SecRequirement" >> output/amfid/trust_imports.txt 2>&1
+          echo "=== 按库分类的导入 ===" > output/1_static/imports_by_lib.txt
+          nm -u amfid | awk '{print $2}' | sort | uniq -c | sort -rn >> output/1_static/imports_by_lib.txt 2>&1
           
-          echo "=== CoreTrust 相关字符串 ===" > output/amfid/coretrust_strings.txt
-          strings amfid | grep -iE "coretrust|CoreTrust|trustcache|TrustCache|cdhash|CDHash|img4|IMG4|im4p|IM4P|AMFI|amfi|cms_verify|CMS|PKCS7|signature|entitlement|provision|teamid|TeamID|TeamIdentifier|csops|CS_OPS" | sort -u >> output/amfid/coretrust_strings.txt
+          echo "=== 所有字符串 (>=4字符) ===" > output/1_static/strings_all.txt
+          strings -n 4 amfid | sort -u >> output/1_static/strings_all.txt 2>&1
           
-          echo "=== XPC 相关字符串 ===" > output/amfid/xpc_strings.txt
-          strings amfid | grep -iE "xpc|XPC|bootstrap|mach_msg|mach_port|task_for_pid|host_get" | sort -u >> output/amfid/xpc_strings.txt
+          echo "=== 硬编码路径 ===" > output/1_static/strings_paths.txt
+          strings amfid | grep -E "^/" | sort -u >> output/1_static/strings_paths.txt 2>&1
           
-          echo "=== 所有字符串 ===" > output/amfid/all_strings.txt
-          strings -n 8 amfid | sort -u >> output/amfid/all_strings.txt
+          echo "=== URL/域名 ===" > output/1_static/strings_urls.txt
+          strings amfid | grep -iE "https?://|\.apple\.com|\.icloud\.com" | sort -u >> output/1_static/strings_urls.txt 2>&1
+          
+          echo "=== 错误消息 ===" > output/1_static/strings_errors.txt
+          strings amfid | grep -iE "error|fail|invalid|denied|reject|unknown|missing" | sort -u >> output/1_static/strings_errors.txt 2>&1
 
-      - name: amfid 反汇编
+      - name: 一、函数列表和控制流
         run: |
-          # 完整函数列表
-          r2 -q -c 'aaa; afl' amfid > output/amfid/functions.txt 2>&1
+          echo "=== 所有函数及地址 ===" > output/1_static/functions.txt
+          r2 -q -c 'aaa; afl' amfid >> output/1_static/functions.txt 2>&1
           
-          # 入口点
-          r2 -q -c 'aaa; ie' amfid > output/amfid/entry_points.txt 2>&1
+          echo "=== 函数调用关系 ===" > output/1_static/callgraph.txt
+          r2 -q -c 'aaa; agf' amfid >> output/1_static/callgraph.txt 2>&1
           
-          # main 函数反汇编
-          r2 -q -c 'aaa; s main; pdf' amfid > output/amfid/main_disasm.txt 2>&1
-          
-          # main 函数伪代码
-          r2 -q -c 'aaa; aac; pdc @ main' amfid > output/amfid/main_decompiled.c 2>&1
-          
-          # main 函数交叉引用
-          r2 -q -c 'aaa; axt main' amfid > output/amfid/main_xrefs.txt 2>&1
-          
-          # 所有函数伪代码
-          r2 -q -c 'aaa; aac; aaft; pdc' amfid > output/amfid/all_decompiled.c 2>&1
-          
-          # 签名验证相关函数反汇编
-          for FUNC in $(nm amfid 2>/dev/null | grep -iE "trust|verify|validate|sign|check|code|hash|cdhash|entitle|provision|cert|cms|pkcs|img4|amfi" | awk '{print $3}' | head -50); do
-            echo "=== $FUNC ===" >> output/amfid/trust_functions_disasm.txt
-            r2 -q -c "aaa; s sym.$FUNC; pdf" amfid >> output/amfid/trust_functions_disasm.txt 2>&1 || true
-            echo "=== $FUNC 伪代码 ===" >> output/amfid/trust_functions_decompiled.c
-            r2 -q -c "aaa; s sym.$FUNC; pdc" amfid >> output/amfid/trust_functions_decompiled.c 2>&1 || true
+          echo "=== 导入函数交叉引用 ===" > output/1_static/import_xrefs.txt
+          for FUNC in $(nm -u amfid | awk '{print $3}' | head -50); do
+            echo "=== $FUNC ===" >> output/1_static/import_xrefs.txt
+            r2 -q -c "aaa; /a $FUNC" amfid >> output/1_static/import_xrefs.txt 2>&1 || true
           done
-          
-          # 搜索 CoreTrust 交叉引用
-          r2 -q -c 'aaa; /a coretrust' amfid > output/amfid/coretrust_xrefs.txt 2>&1
-          r2 -q -c 'aaa; /a trustcache' amfid > output/amfid/trustcache_xrefs.txt 2>&1
-          r2 -q -c 'aaa; /a AMFI' amfid > output/amfid/amfi_xrefs.txt 2>&1
-          r2 -q -c 'aaa; /a verify' amfid > output/amfid/verify_xrefs.txt 2>&1
-          r2 -q -c 'aaa; /a signature' amfid > output/amfid/signature_xrefs.txt 2>&1
-          r2 -q -c 'aaa; /a cdhash' amfid > output/amfid/cdhash_xrefs.txt 2>&1
-          
-          cat output/amfid/trust_imports.txt
 
-      - name: Security.framework 分析
+      # ==================== 二、签名验证链分析 ====================
+      - name: 二、CMS/PKCS7 签名解析
         run: |
-          SEC_BIN=$(find extracted_frameworks -type f -name "Security" 2>/dev/null | head -1)
-          if [ -n "$SEC_BIN" ]; then
-            echo "=== Security.framework ==="
-            file "$SEC_BIN" > output/security_fw/info.txt
-            
-            nm -C -a "$SEC_BIN" > output/security_fw/symbols.txt 2>&1
-            nm -gU "$SEC_BIN" > output/security_fw/exports.txt 2>&1
-            
-            # SecCode API
-            echo "=== SecCode API ===" > output/security_fw/api_seccode.txt
-            nm -gU "$SEC_BIN" | grep -iE "SecCode" >> output/security_fw/api_seccode.txt
-            
-            # SecTrust API
-            echo "=== SecTrust API ===" > output/security_fw/api_sectrust.txt
-            nm -gU "$SEC_BIN" | grep -iE "SecTrust|SecPolicy|SecCertificate" >> output/security_fw/api_sectrust.txt
-            
-            # CMS API
-            echo "=== CMS API ===" > output/security_fw/api_cms.txt
-            nm -gU "$SEC_BIN" | grep -iE "CMS|SecCMS|PKCS" >> output/security_fw/api_cms.txt
-            
-            # 签名验证相关
-            strings "$SEC_BIN" | grep -iE "coretrust|trustcache|cdhash|signature|verify|cms|pkcs|img4|amfi|teamid|oid" | sort -u > output/security_fw/trust_strings.txt
-            
-            # 反汇编 SecCode 函数
-            for FUNC in $(nm -gU "$SEC_BIN" 2>/dev/null | grep -iE "SecCodeCreate|SecCodeCheckValidity|SecCodeCopySigningInformation" | awk '{print $3}'); do
-              echo "=== $FUNC ===" >> output/security_fw/seccode_disasm.txt
-              r2 -q -c "aaa; s sym.$FUNC; pdf" "$SEC_BIN" >> output/security_fw/seccode_disasm.txt 2>&1 || true
-              echo "=== $FUNC 伪代码 ===" >> output/security_fw/seccode_decompiled.c
-              r2 -q -c "aaa; s sym.$FUNC; pdc" "$SEC_BIN" >> output/security_fw/seccode_decompiled.c 2>&1 || true
-            done
-          fi
+          echo "=== CMS 相关字符串 ===" > output/2_signing/cms_strings.txt
+          strings amfid | grep -iE "CMS|PKCS7|pkcs|DER|ASN1|asn1|ber|CER|certificate|x509|X509" | sort -u >> output/2_signing/cms_strings.txt
+          
+          echo "=== CMS 相关函数 ===" > output/2_signing/cms_functions.txt
+          nm amfid 2>/dev/null | grep -iE "cms|pkcs|der|asn|ber|cer|x509|cert" >> output/2_signing/cms_functions.txt
+          nm -u amfid | grep -iE "CMS|PKCS|DER|ASN|CER|X509|cert" >> output/2_signing/cms_functions.txt
+          
+          echo "=== CMS 相关导入 ===" > output/2_signing/cms_imports.txt
+          nm -u amfid | grep -iE "CMS|PKCS|DER|ASN|CER" >> output/2_signing/cms_imports.txt
+          
+          # 反汇编 CMS 相关函数
+          for FUNC in $(nm amfid 2>/dev/null | grep -iE "cms|pkcs|der|asn" | awk '{print $3}' | head -20); do
+            echo "=== $FUNC ===" >> output/2_signing/cms_disasm.txt
+            r2 -q -c "aaa; s sym.$FUNC; pdf" amfid >> output/2_signing/cms_disasm.txt 2>&1 || true
+          done
 
-      - name: AppleMobileFileIntegrity.framework 分析
+      - name: 二、CDHash 和哈希验证
         run: |
-          AMFI_BIN=$(find extracted_frameworks -type f -name "AppleMobileFileIntegrity" 2>/dev/null | head -1)
-          if [ -n "$AMFI_BIN" ]; then
-            echo "=== AppleMobileFileIntegrity.framework ==="
-            file "$AMFI_BIN" > output/amfi_fw/info.txt
-            
-            nm -C -a "$AMFI_BIN" > output/amfi_fw/symbols.txt 2>&1
-            nm -gU "$AMFI_BIN" > output/amfi_fw/exports.txt 2>&1
-            
-            strings "$AMFI_BIN" | grep -iE "coretrust|trustcache|cdhash|signature|verify|amfi|teamid|oid|entitle" | sort -u > output/amfi_fw/trust_strings.txt
-            
-            # 反汇编导出函数
-            for FUNC in $(nm -gU "$AMFI_BIN" 2>/dev/null | head -30 | awk '{print $3}'); do
-              echo "=== $FUNC ===" >> output/amfi_fw/exports_disasm.txt
-              r2 -q -c "aaa; s sym.$FUNC; pdf" "$AMFI_BIN" >> output/amfi_fw/exports_disasm.txt 2>&1 || true
-            done
-          fi
+          echo "=== CDHash 相关字符串 ===" > output/2_signing/cdhash_strings.txt
+          strings amfid | grep -iE "cdhash|CDHash|cd_hash|hash|sha|SHA|md5|MD5" | sort -u >> output/2_signing/cdhash_strings.txt
+          
+          echo "=== CDHash 相关函数 ===" > output/2_signing/cdhash_functions.txt
+          nm amfid 2>/dev/null | grep -iE "cdhash|hash|sha|md5|digest" >> output/2_signing/cdhash_functions.txt
+          nm -u amfid | grep -iE "CC_SHA|CC_MD5|CCDigest|cdhash" >> output/2_signing/cdhash_functions.txt
+          
+          for FUNC in $(nm amfid 2>/dev/null | grep -iE "cdhash|hash|sha|md5|digest" | awk '{print $3}' | head -20); do
+            echo "=== $FUNC ===" >> output/2_signing/cdhash_disasm.txt
+            r2 -q -c "aaa; s sym.$FUNC; pdf" amfid >> output/2_signing/cdhash_disasm.txt 2>&1 || true
+          done
 
-      - name: Ghidra 分析 amfid
+      - name: 二、IMG4/IM4P 验证
+        run: |
+          echo "=== IMG4 相关字符串 ===" > output/2_signing/img4_strings.txt
+          strings amfid | grep -iE "IMG4|IM4P|im4p|im4m|im4r|Image4|AppleImage4" | sort -u >> output/2_signing/img4_strings.txt
+          
+          echo "=== IMG4 相关函数 ===" > output/2_signing/img4_functions.txt
+          nm amfid 2>/dev/null | grep -iE "img4|im4p|im4m|im4r|image4" >> output/2_signing/img4_functions.txt
+          nm -u amfid | grep -iE "IMG4|Image4|img4" >> output/2_signing/img4_functions.txt
+          
+          for FUNC in $(nm amfid 2>/dev/null | grep -iE "img4|im4p|image4" | awk '{print $3}' | head -20); do
+            echo "=== $FUNC ===" >> output/2_signing/img4_disasm.txt
+            r2 -q -c "aaa; s sym.$FUNC; pdf" amfid >> output/2_signing/img4_disasm.txt 2>&1 || true
+          done
+
+      - name: 二、Entitlement 和 Provision 验证
+        run: |
+          echo "=== Entitlement 相关字符串 ===" > output/2_signing/entitlement_strings.txt
+          strings amfid | grep -iE "entitlement|Entitlement|entitle|provision|Provision|provisioning|Provisioning|embedded.mobileprovision" | sort -u >> output/2_signing/entitlement_strings.txt
+          
+          echo "=== Entitlement 相关函数 ===" > output/2_signing/entitlement_functions.txt
+          nm amfid 2>/dev/null | grep -iE "entitle|provision" >> output/2_signing/entitlement_functions.txt
+          nm -u amfid | grep -iE "entitle|provision|SecTask|SecCode" >> output/2_signing/entitlement_functions.txt
+          
+          for FUNC in $(nm amfid 2>/dev/null | grep -iE "entitle|provision" | awk '{print $3}' | head -20); do
+            echo "=== $FUNC ===" >> output/2_signing/entitlement_disasm.txt
+            r2 -q -c "aaa; s sym.$FUNC; pdf" amfid >> output/2_signing/entitlement_disasm.txt 2>&1 || true
+          done
+
+      - name: 二、TeamID 验证
+        run: |
+          echo "=== TeamID 相关字符串 ===" > output/2_signing/teamid_strings.txt
+          strings amfid | grep -iE "TeamID|teamid|team_id|TeamIdentifier|OU=" | sort -u >> output/2_signing/teamid_strings.txt
+          
+          echo "=== SecCode/SecTrust API ===" > output/2_signing/seccode_api.txt
+          nm -u amfid | grep -iE "SecCode|SecTrust|SecRequirement|SecStaticCode|SecTask|SecPolicy|SecCertificate" >> output/2_signing/seccode_api.txt
+
+      # ==================== 三、进程间通信分析 ====================
+      - name: 三、Mach 消息分析
+        run: |
+          echo "=== Mach 相关字符串 ===" > output/3_ipc/mach_strings.txt
+          strings amfid | grep -iE "mach_msg|mach_port|mach_host|task_for_pid|host_get|bootstrap|mach_task|mach_vm" | sort -u >> output/3_ipc/mach_strings.txt
+          
+          echo "=== Mach 相关函数 ===" > output/3_ipc/mach_functions.txt
+          nm amfid 2>/dev/null | grep -iE "mach_msg|mach_port|mach_" >> output/3_ipc/mach_functions.txt
+          nm -u amfid | grep -iE "mach_msg|mach_port|mach_host|task_for_pid|bootstrap" >> output/3_ipc/mach_functions.txt
+          
+          for FUNC in $(nm amfid 2>/dev/null | grep -iE "mach_msg|mach_port" | awk '{print $3}' | head -20); do
+            echo "=== $FUNC ===" >> output/3_ipc/mach_disasm.txt
+            r2 -q -c "aaa; s sym.$FUNC; pdf" amfid >> output/3_ipc/mach_disasm.txt 2>&1 || true
+          done
+
+      - name: 三、XPC 服务分析
+        run: |
+          echo "=== XPC 相关字符串 ===" > output/3_ipc/xpc_strings.txt
+          strings amfid | grep -iE "xpc_connection|xpc_dictionary|xpc_pipe|xpc_|XPC|com\.apple" | sort -u >> output/3_ipc/xpc_strings.txt
+          
+          echo "=== XPC 相关函数 ===" > output/3_ipc/xpc_functions.txt
+          nm -u amfid | grep -iE "xpc_" >> output/3_ipc/xpc_functions.txt
+          
+          echo "=== XPC 服务名 ===" > output/3_ipc/xpc_services.txt
+          strings amfid | grep -E "com\.apple\.[a-z]+\.[a-z]+" | sort -u >> output/3_ipc/xpc_services.txt
+          
+          for FUNC in $(nm -u amfid | grep -iE "xpc_connection_create|xpc_connection_send|xpc_dictionary_create" | awk '{print $3}' | head -10); do
+            echo "=== XPC 交叉引用: $FUNC ===" >> output/3_ipc/xpc_xrefs.txt
+            r2 -q -c "aaa; /a $FUNC" amfid >> output/3_ipc/xpc_xrefs.txt 2>&1 || true
+          done
+
+      - name: 三、通信接口汇总
+        run: |
+          echo "=== 所有 IPC 相关字符串 ===" > output/3_ipc/ipc_all.txt
+          strings amfid | grep -iE "mach|XPC|xpc|port|bootstrap|service|connection|message|send|receive|handler|callback|delegate" | sort -u >> output/3_ipc/ipc_all.txt
+          
+          echo "=== 通知/信号 ===" > output/3_ipc/notifications.txt
+          strings amfid | grep -iE "notify|notification|signal|CFNotification|DarwinNotify|dispatch_source" | sort -u >> output/3_ipc/notifications.txt
+          
+          echo "=== 共享内存 ===" > output/3_ipc/shared_memory.txt
+          strings amfid | grep -iE "shared|mmap|shm|vm_allocate|vm_map|memory" | sort -u >> output/3_ipc/shared_memory.txt
+
+      # ==================== 四、漏洞挖掘 ====================
+      - name: 四、缓冲区溢出风险
+        run: |
+          echo "=== 危险函数 ===" > output/4_vuln/dangerous_functions.txt
+          nm -u amfid | grep -iE "strcpy|strcat|sprintf|gets|scanf|memcpy|memmove|bcopy|read|recv|fscanf|sscanf" >> output/4_vuln/dangerous_functions.txt
+          
+          echo "=== 内存操作函数 ===" > output/4_vuln/memory_functions.txt
+          nm -u amfid | grep -iE "malloc|calloc|realloc|free|mmap|vm_allocate|vm_deallocate|mach_vm" >> output/4_vuln/memory_functions.txt
+          
+          echo "=== 内存操作交叉引用 ===" > output/4_vuln/memory_xrefs.txt
+          for FUNC in malloc free calloc realloc memcpy memmove strcpy; do
+            echo "=== $FUNC ===" >> output/4_vuln/memory_xrefs.txt
+            r2 -q -c "aaa; /a $FUNC" amfid >> output/4_vuln/memory_xrefs.txt 2>&1 || true
+          done
+
+      - name: 四、整数溢出和格式化字符串
+        run: |
+          echo "=== 整数操作 ===" > output/4_vuln/integer_ops.txt
+          nm amfid 2>/dev/null | grep -iE "size|length|count|offset|index|len" >> output/4_vuln/integer_ops.txt
+          
+          echo "=== 格式化函数 ===" > output/4_vuln/format_functions.txt
+          nm -u amfid | grep -iE "printf|fprintf|snprintf|asprintf|syslog|os_log|NSLog" >> output/4_vuln/format_functions.txt
+          
+          for FUNC in $(nm -u amfid | grep -iE "printf|fprintf|snprintf|syslog|os_log|NSLog" | awk '{print $3}' | head -10); do
+            echo "=== $FUNC 交叉引用 ===" >> output/4_vuln/format_xrefs.txt
+            r2 -q -c "aaa; /a $FUNC" amfid >> output/4_vuln/format_xrefs.txt 2>&1 || true
+          done
+
+      - name: 四、路径遍历和符号链接
+        run: |
+          echo "=== 文件操作 ===" > output/4_vuln/file_operations.txt
+          nm -u amfid | grep -iE "open|read|write|close|stat|lstat|fstat|access|realpath|readlink|symlink|chdir|chmod|chown|unlink|rename|mkdir|rmdir|fopen|fread|fwrite|fclose" >> output/4_vuln/file_operations.txt
+          
+          echo "=== 路径字符串 ===" > output/4_vuln/path_strings.txt
+          strings amfid | grep -E "^/" | sort -u >> output/4_vuln/path_strings.txt
+          
+          echo "=== 文件操作交叉引用 ===" > output/4_vuln/file_xrefs.txt
+          for FUNC in open read write stat access realpath symlink; do
+            echo "=== $FUNC ===" >> output/4_vuln/file_xrefs.txt
+            r2 -q -c "aaa; /a $FUNC" amfid >> output/4_vuln/file_xrefs.txt 2>&1 || true
+          done
+
+      - name: 四、权限提升和代码执行
+        run: |
+          echo "=== 权限相关 ===" > output/4_vuln/privilege.txt
+          strings amfid | grep -iE "setuid|setgid|seteuid|setegid|getuid|geteuid|getgid|getegid|root|wheel|admin|entitle|allow|deny|permit|grant" | sort -u >> output/4_vuln/privilege.txt
+          
+          echo "=== 代码执行 ===" > output/4_vuln/code_exec.txt
+          strings amfid | grep -iE "exec|spawn|fork|vfork|posix_spawn|system|popen|dlopen|dlsym|NSTask|NSBundle" | sort -u >> output/4_vuln/code_exec.txt
+          
+          echo "=== CS_OPS 相关 ===" > output/4_vuln/csops.txt
+          strings amfid | grep -iE "csops|CS_OPS|cs_ops" | sort -u >> output/4_vuln/csops.txt
+          nm -u amfid | grep -iE "csops" >> output/4_vuln/csops.txt
+
+      - name: 四、错误处理和逻辑漏洞
+        run: |
+          echo "=== 错误处理 ===" > output/4_vuln/error_handling.txt
+          strings amfid | grep -iE "error|fail|invalid|deny|denied|reject|rejected|unknown|unexpected|missing|timeout|retry" | sort -u >> output/4_vuln/error_handling.txt
+          
+          echo "=== 返回码分析 ===" > output/4_vuln/return_codes.txt
+          strings amfid | grep -E "^[0-9]+$" | sort -u >> output/4_vuln/return_codes.txt
+          
+          echo "=== 验证逻辑关键字 ===" > output/4_vuln/verify_logic.txt
+          strings amfid | grep -iE "verify|validate|check|compare|match|authorize|authenticate|allow|deny|pass|fail|success|true|false|yes|no|ok" | sort -u >> output/4_vuln/verify_logic.txt
+
+      # ==================== Ghidra 分析 ====================
+      - name: Ghidra 深度反编译
+        if: env.GHIDRA_HOME != ''
         run: |
           if [ -f amfid ] && [ -n "$GHIDRA_HOME" ]; then
-            echo "=== Ghidra 分析 amfid ==="
             GHIDRA_HEADLESS="$GHIDRA_HOME/support/analyzeHeadless"
             if [ -f "$GHIDRA_HEADLESS" ]; then
-              PROJECT_DIR="output/amfid/ghidra_project"
+              PROJECT_DIR="output/ghidra/amfid_project"
               mkdir -p "$PROJECT_DIR"
               "$GHIDRA_HEADLESS" "$PROJECT_DIR" "amfid" -import amfid -postScript "AutoAnalysis.java" -analysisTimeoutPerFile 600 2>&1 || true
-              echo "Ghidra 项目已创建"
             fi
           fi
 
-      - name: 生成分析报告
+      # ==================== 报告 ====================
+      - name: 生成完整报告
         run: |
-          echo "# amfid 完整逆向分析报告" > output/reports/AMFID_REPORT.md
-          echo "" >> output/reports/AMFID_REPORT.md
-          
-          echo "## 文件信息" >> output/reports/AMFID_REPORT.md
-          cat output/amfid/info.txt >> output/reports/AMFID_REPORT.md
-          
-          echo "" >> output/reports/AMFID_REPORT.md
-          echo "## 动态库依赖" >> output/reports/AMFID_REPORT.md
-          cat output/amfid/dylibs.txt >> output/reports/AMFID_REPORT.md
-          
-          echo "" >> output/reports/AMFID_REPORT.md
-          echo "## 代码签名相关导入函数" >> output/reports/AMFID_REPORT.md
-          cat output/amfid/trust_imports.txt >> output/reports/AMFID_REPORT.md
-          
-          echo "" >> output/reports/AMFID_REPORT.md
-          echo "## CoreTrust 相关字符串" >> output/reports/AMFID_REPORT.md
-          cat output/amfid/coretrust_strings.txt >> output/reports/AMFID_REPORT.md
-          
-          echo "" >> output/reports/AMFID_REPORT.md
-          echo "## main 函数反汇编" >> output/reports/AMFID_REPORT.md
-          head -100 output/amfid/main_disasm.txt >> output/reports/AMFID_REPORT.md
-          
-          echo "" >> output/reports/AMFID_REPORT.md
-          echo "## 签名验证函数列表" >> output/reports/AMFID_REPORT.md
-          nm amfid 2>/dev/null | grep -iE "trust|verify|validate|sign|check|code|hash|cdhash|entitle|provision|cert|cms|pkcs|img4|amfi" | head -50 >> output/reports/AMFID_REPORT.md
+          echo "# amfid 完整逆向分析报告" > output/reports/AMFID_FULL_REPORT.md
+          echo "" >> output/reports/AMFID_FULL_REPORT.md
+          echo "## 一、二进制静态分析" >> output/reports/AMFID_FULL_REPORT.md
+          echo "### 文件信息" >> output/reports/AMFID_FULL_REPORT.md
+          cat output/1_static/info.txt >> output/reports/AMFID_FULL_REPORT.md
+          echo "" >> output/reports/AMFID_FULL_REPORT.md
+          echo "### 依赖库" >> output/reports/AMFID_FULL_REPORT.md
+          cat output/1_static/dylibs.txt >> output/reports/AMFID_FULL_REPORT.md
+          echo "" >> output/reports/AMFID_FULL_REPORT.md
+          echo "### 导出函数" >> output/reports/AMFID_FULL_REPORT.md
+          cat output/1_static/exports.txt >> output/reports/AMFID_FULL_REPORT.md
+          echo "" >> output/reports/AMFID_FULL_REPORT.md
+          echo "## 二、签名验证链" >> output/reports/AMFID_FULL_REPORT.md
+          echo "### CMS 相关" >> output/reports/AMFID_FULL_REPORT.md
+          cat output/2_signing/cms_imports.txt >> output/reports/AMFID_FULL_REPORT.md
+          echo "" >> output/reports/AMFID_FULL_REPORT.md
+          echo "### CDHash 相关" >> output/reports/AMFID_FULL_REPORT.md
+          cat output/2_signing/cdhash_functions.txt >> output/reports/AMFID_FULL_REPORT.md
+          echo "" >> output/reports/AMFID_FULL_REPORT.md
+          echo "### SecCode API" >> output/reports/AMFID_FULL_REPORT.md
+          cat output/2_signing/seccode_api.txt >> output/reports/AMFID_FULL_REPORT.md
+          echo "" >> output/reports/AMFID_FULL_REPORT.md
+          echo "## 三、进程间通信" >> output/reports/AMFID_FULL_REPORT.md
+          echo "### XPC 服务" >> output/reports/AMFID_FULL_REPORT.md
+          cat output/3_ipc/xpc_services.txt >> output/reports/AMFID_FULL_REPORT.md
+          echo "" >> output/reports/AMFID_FULL_REPORT.md
+          echo "### Mach 函数" >> output/reports/AMFID_FULL_REPORT.md
+          cat output/3_ipc/mach_functions.txt >> output/reports/AMFID_FULL_REPORT.md
+          echo "" >> output/reports/AMFID_FULL_REPORT.md
+          echo "## 四、漏洞挖掘" >> output/reports/AMFID_FULL_REPORT.md
+          echo "### 危险函数" >> output/reports/AMFID_FULL_REPORT.md
+          cat output/4_vuln/dangerous_functions.txt >> output/reports/AMFID_FULL_REPORT.md
+          echo "" >> output/reports/AMFID_FULL_REPORT.md
+          echo "### 格式化函数" >> output/reports/AMFID_FULL_REPORT.md
+          cat output/4_vuln/format_functions.txt >> output/reports/AMFID_FULL_REPORT.md
 
       - name: 上传分析结果
         uses: actions/upload-artifact@v4
         with:
-          name: amfid_full_reverse
+          name: amfid_full_analysis
           path: output/
           retention-days: 90
